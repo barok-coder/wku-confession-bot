@@ -11,10 +11,12 @@ from fastapi import FastAPI
 import uvicorn
 
 # --- CONFIG ---
-API_TOKEN = os.environ.get("BOT_TOKEN", "8857559349:AAFGI_hxQ3MI04cFbHbzIIgh1QU-DGkuCJ4")
+# This forces the bot to strictly look at your Render Environment setting
+API_TOKEN = os.environ.get("BOT_TOKEN") 
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-# Handles both numbers (-100123) and channel handles (@my_admin_channel) safely!
+
+# Handles usernames (@my_channel) and numbers cleanly
 ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID", "@wku_admins_review_team")
 
 logging.basicConfig(level=logging.INFO)

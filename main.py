@@ -19,7 +19,7 @@ import uvicorn
 API_TOKEN = os.environ.get("BOT_TOKEN")
 
 CHANNEL_ID = "@wku_confessions_official"
-BOT_USERNAME = "wku_confession_post"
+BOT_USERNAME = "wku_confessionsbot"
 ADMIN_GROUP_ID = "@wku_admins_review_team"
 
 RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"

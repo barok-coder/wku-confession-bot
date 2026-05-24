@@ -22,7 +22,7 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Memory tracking to link confessions to channel posts and discussion posts
+# In-memory mapping to map confession IDs to tracking info
 confessions_db = {} 
 confession_counter = 1
 
@@ -32,18 +32,19 @@ class BotStates(StatesGroup):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()  # Clear any stuck previous states cleanly
     args = message.text.split()
     
-    # Handle user clicking "+ Add Comment" from the channel post
+    # Handle user clicking "+ Add Comment" from the channel
     if len(args) > 1 and args[1].startswith("comm_"):
-        channel_post_id = args[1].replace("comm_", "")
-        await state.update_data(target_post_id=int(channel_post_id))
+        conf_id = args[1].replace("comm_", "")
+        await state.update_data(target_conf_id=conf_id)
         await state.set_state(BotStates.waiting_for_comment)
-        await message.answer("✍️ Send your anonymous comment below:")
+        await message.answer(f"✍️ **Replying anonymously to Confession #{conf_id}.**\nSend your comment text below:")
         return
 
     await state.set_state(BotStates.waiting_for_confession)
-    await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo:")
+    await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo right here:")
 
 async def send_to_admins(message: types.Message):
     global confession_counter
@@ -60,7 +61,8 @@ async def send_to_admins(message: types.Message):
         "dislikes": 0,
         "liked_users": set(),
         "disliked_users": set(),
-        "channel_message_id": None
+        "channel_message_id": None,
+        "discussion_message_id": None
     }
     
     preview_text = text_content or "[Photo Content]"
@@ -81,15 +83,12 @@ async def process_confession_submission(message: types.Message, state: FSMContex
     await send_to_admins(message)
     await state.clear()
 
-def create_channel_keyboard(conf_id, message_id):
+def create_channel_keyboard(conf_id):
     data = confessions_db[conf_id]
     builder = InlineKeyboardBuilder()
-    
-    # + Add Comment button points directly to the specific post message ID
-    builder.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=comm_{message_id}")
+    builder.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=comm_{conf_id}")
     builder.button(text=f"👍 {data['likes']}", callback_data=f"like_{conf_id}")
     builder.button(text=f"👎 {data['dislikes']}", callback_data=f"dislike_{conf_id}")
-    
     builder.adjust(1, 2)
     return builder.as_markup()
 
@@ -100,21 +99,14 @@ async def approve_callback(callback: types.CallbackQuery):
     if not data: return
     
     channel_post_text = f"📢 **WKU Confession #{conf_id}**\n\n{data['text'] or ''}"
+    markup = create_channel_keyboard(conf_id)
     
-    # Post temporary version to get the message_id safely
     if data["photo_id"]:
-        sent = await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text)
+        sent = await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text, reply_markup=markup)
     else:
-        sent = await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text)
+        sent = await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text, reply_markup=markup)
     
-    # Save the real message ID and append our clean feedback interface
     data["channel_message_id"] = sent.message_id
-    markup = create_channel_keyboard(conf_id, sent.message_id)
-    
-    if data["photo_id"]:
-        await bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=sent.message_id, caption=channel_post_text, reply_markup=markup)
-    else:
-        await bot.edit_message_text(chat_id=CHANNEL_ID, message_id=sent.message_id, text=channel_post_text, reply_markup=markup)
     
     try:
         if callback.message.photo:
@@ -128,7 +120,52 @@ async def approve_callback(callback: types.CallbackQuery):
 async def reject_callback(callback: types.CallbackQuery):
     await callback.message.delete()
 
-# --- INTERACTIVE VOTING LOGIC ---
+# --- REPLIES INTERCEPTION FOR DISCUSSION GROUPS ---
+@dp.message(F.author_signature.startswith("📢 WKU Confession #") | F.forward_from_chat(username=CHANNEL_ID.replace("@", "")))
+async def catch_discussion_forward(message: types.Message):
+    """Automatically tracks whenever Telegram automatically copies your post to the Discussion Group"""
+    try:
+        text = message.text if message.text else message.caption
+        if not text: return
+        
+        # Parse the dynamic confession ID out from the signature line
+        first_line = text.split("\n")[0]
+        conf_id = first_line.split("#")[-1].strip()
+        
+        if conf_id in confessions_db:
+            confessions_db[conf_id]["discussion_chat_id"] = message.chat.id
+            confessions_db[conf_id]["discussion_message_id"] = message.message_id
+            logging.info(f"Successfully mapped confession #{conf_id} to group chat post {message.message_id}")
+    except Exception as e:
+        logging.error(f"Error mapping discussion chat forward: {e}")
+
+# --- ANONYMOUS COMMENT SUBMISSION ROUTER ---
+@dp.message(BotStates.waiting_for_comment, F.text)
+async def process_anonymous_comment(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    conf_id = state_data.get("target_conf_id")
+    data = confessions_db.get(conf_id)
+    
+    if not data or not data.get("discussion_message_id"):
+        await message.answer("⚠️ System syncing! Please wait a moment for the post to register and try again.")
+        await state.clear()
+        return
+    
+    try:
+        # Post the comment directly into the group as an explicit reply to the channel's copy
+        await bot.send_message(
+            chat_id=data["discussion_chat_id"],
+            text=f"💬 **Anonymous:**\n\n{message.text}",
+            reply_to_message_id=data["discussion_message_id"]
+        )
+        await message.answer("🚀 Your anonymous comment has been posted directly inside the replies!")
+    except Exception as e:
+        logging.error(f"Error dropping nested reply: {e}")
+        await message.answer("❌ Failed to post comment inside the channel's native feed.")
+        
+    await state.clear()
+
+# --- VOTING LOGIC ---
 @dp.callback_query(F.data.startswith("like_"))
 async def like_post(callback: types.CallbackQuery):
     conf_id = callback.data.replace("like_", "")
@@ -146,7 +183,7 @@ async def like_post(callback: types.CallbackQuery):
             data["disliked_users"].remove(user_id)
             data["dislikes"] -= 1
             
-    await callback.message.edit_reply_markup(reply_markup=create_channel_keyboard(conf_id, data["channel_message_id"]))
+    await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=data["channel_message_id"], reply_markup=create_channel_keyboard(conf_id))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("dislike_"))
@@ -166,29 +203,8 @@ async def dislike_post(callback: types.CallbackQuery):
             data["liked_users"].remove(user_id)
             data["likes"] -= 1
             
-    await callback.message.edit_reply_markup(reply_markup=create_channel_keyboard(conf_id, data["channel_message_id"]))
+    await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=data["channel_message_id"], reply_markup=create_channel_keyboard(conf_id))
     await callback.answer()
-
-# --- THE NATIVE NESTED REPLY MAGIC ---
-@dp.message(BotStates.waiting_for_comment, F.text)
-async def process_anonymous_comment(message: types.Message, state: FSMContext):
-    state_data = await state.get_data()
-    target_post_id = state_data.get("target_post_id")
-    
-    try:
-        # We forward the message directly into the channel, but passing the post's message_id
-        # as a reply_to_message_id parameter. Telegram handles the rest!
-        await bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=f"💬 {message.text}",
-            reply_to_message_id=target_post_id
-        )
-        await message.answer("🚀 Your anonymous comment has been posted inside the replies section!")
-    except Exception as e:
-        logging.error(f"Failed to post native reply: {e}")
-        await message.answer("❌ Error posting comment. Make sure discussion group is linked.")
-        
-    await state.clear()
 
 @dp.message(F.text | F.photo)
 async def fallback_confession_handler(message: types.Message, state: FSMContext):

@@ -14,7 +14,7 @@ import os
 API_TOKEN = os.environ.get("BOT_TOKEN", "8857559349:AAFGI_hxQ3MI04cFbHbzIIgh1QU-DGkuCJ4")
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-ADMIN_GROUP_ID = -1001234567890 # Put your real Admin numeric group ID here!
+ADMIN_GROUP_ID = -1003905179562 # Put your real Admin numeric group ID here!
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)

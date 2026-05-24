@@ -14,7 +14,7 @@ import uvicorn
 
 # ================= CONFIG =================
 
-API_TOKEN = os.getenv("BOT_TOKEN")
+API_TOKEN = os.getenv("8857559349:AAFZMHIt2qM8GE7XVoxvWbPmSKHFooAa8Ng")
 
 CHANNEL_ID = "@wku_confessions_official"
 ADMIN_GROUP = -1003923693636   # your linked discussion group ID

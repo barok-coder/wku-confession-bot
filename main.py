@@ -1,25 +1,28 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from fastapi import FastAPI
 import uvicorn
-import os
 
 # --- CONFIG ---
 API_TOKEN = os.environ.get("BOT_TOKEN", "8857559349:AAFGI_hxQ3MI04cFbHbzIIgh1QU-DGkuCJ4")
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-
-# Dynamically loads your group ID from Render and safely handles the negative sign
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", -1003905179562))
+ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", -1001234567890)) 
 
 logging.basicConfig(level=logging.INFO)
+
+# Setup Bot and explicit In-Memory storage for State management
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
 confessions_db = {} 
 confession_counter = 1
 
@@ -36,30 +39,42 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await state.set_state(BotStates.waiting_for_comment)
         await message.answer(f"✍️ Replying anonymously to Confession #{conf_id}.\nSend your comment below:")
         return
+        
     await state.set_state(BotStates.waiting_for_confession)
     await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession as text or photo.")
 
-@dp.message(BotStates.waiting_for_confession, F.text | F.photo)
-async def process_confession_submission(message: types.Message, state: FSMContext):
+# Helper function to forward content to the admins
+async def send_to_admins(message: types.Message):
     global confession_counter
     conf_id = str(confession_counter)
     confession_counter += 1
+    
+    text_content = message.text if message.text else message.caption
+    photo_id = message.photo[-1].file_id if message.photo else None
+    
     confessions_db[conf_id] = {
-        "text": message.text if message.text else message.caption,
-        "photo_id": message.photo[-1].file_id if message.photo else None,
+        "text": text_content,
+        "photo_id": photo_id,
         "sender_id": message.from_user.id
     }
-    preview_text = confessions_db[conf_id]["text"] or "[Photo Content]"
+    
+    preview_text = text_content or "[Photo Content]"
     admin_caption = f"🚨 **New Confession**\nID: #{conf_id}\n\n{preview_text}"
+    
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Approve", callback_data=f"approve_{conf_id}")
     builder.button(text="❌ Reject", callback_data=f"reject_{conf_id}")
     
-    if confessions_db[conf_id]["photo_id"]:
-        await bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=confessions_db[conf_id]["photo_id"], caption=admin_caption, reply_markup=builder.as_markup())
+    if photo_id:
+        await bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=photo_id, caption=admin_caption, reply_markup=builder.as_markup())
     else:
         await bot.send_message(chat_id=ADMIN_GROUP_ID, text=admin_caption, reply_markup=builder.as_markup())
     await message.answer("📥 Sent to admins for review!")
+
+# Catch conversations explicitly tracking the 'waiting_for_confession' state
+@dp.message(BotStates.waiting_for_confession, F.text | F.photo)
+async def process_confession_submission(message: types.Message, state: FSMContext):
+    await send_to_admins(message)
     await state.clear()
 
 @dp.callback_query(F.data.startswith("approve_"))
@@ -67,14 +82,24 @@ async def approve_callback(callback: types.CallbackQuery):
     conf_id = callback.data.replace("approve_", "")
     data = confessions_db.get(conf_id)
     if not data: return
+    
     comment_builder = InlineKeyboardBuilder()
     comment_builder.button(text="💬 Leave an Anonymous Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
+    
     channel_post_text = f"📢 **WKU Confession #{conf_id}**\n\n{data['text'] or ''}"
     if data["photo_id"]:
         await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text, reply_markup=comment_builder.as_markup())
     else:
         await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text, reply_markup=comment_builder.as_markup())
-    await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
+    
+    # Safely handle caption vs text edits in Admin Panel
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
+        else:
+            await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
+    except Exception:
+        pass
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_callback(callback: types.CallbackQuery):
@@ -89,6 +114,13 @@ async def process_anonymous_comment(message: types.Message, state: FSMContext):
     await message.answer("🚀 Comment published!")
     await state.clear()
 
+# FAIL-SAFE ROUTER: Catches confessions if a user's state gets dropped out of memory
+@dp.message(F.text | F.photo)
+async def fallback_confession_handler(message: types.Message, state: FSMContext):
+    # Simply intercept text/images as a confession directly and clear state safely
+    await send_to_admins(message)
+    await state.clear()
+
 # Tiny Web Service so Render stays awake
 app = FastAPI()
 
@@ -96,14 +128,10 @@ app = FastAPI()
 def read_root():
     return {"status": "alive"}
 
-# Modernized startup routine
 @app.on_event("startup")
 async def on_startup():
-    # This creates a safe background task for the bot inside FastAPI's running event loop
     asyncio.create_task(dp.start_polling(bot))
 
 if __name__ == "__main__":
-    # Render provides a specific port variable automatically
     port = int(os.environ.get("PORT", 10000))
-    # Let uvicorn handle the event loop completely
     uvicorn.run(app, host="0.0.0.0", port=port)

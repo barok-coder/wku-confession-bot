@@ -19,10 +19,12 @@ import uvicorn
 API_TOKEN = os.environ.get("BOT_TOKEN")
 
 CHANNEL_ID = "@wku_confessions_official"
-BOT_USERNAME = "wku_confessionsbot"
 ADMIN_GROUP_ID = "@wku_admins_review_team"
 
-RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"
+# YOUR REAL BOT USERNAME (NO @)
+BOT_USERNAME = "your_bot_username"
+
+RENDER_EXTERNAL_URL = "https://your-render-url.onrender.com"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,21 +35,29 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 
 storage = MemoryStorage()
+
 dp = Dispatcher(storage=storage)
 
 # =========================================================
-# DATABASE (TEMP MEMORY)
+# DATABASES
 # =========================================================
 
 confessions_db = {}
+
+comments_db = {}
+
 confession_counter = 1
+
+comment_counter = 1
 
 # =========================================================
 # STATES
 # =========================================================
 
 class BotStates(StatesGroup):
+
     waiting_for_confession = State()
+
     waiting_for_comment = State()
 
 # =========================================================
@@ -61,28 +71,72 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     args = message.text.split()
 
-    # COMMENT MODE
+    # ==========================================
+    # ADD COMMENT TO CONFESSION
+    # ==========================================
+
     if len(args) > 1 and args[1].startswith("comm_"):
 
         conf_id = args[1].replace("comm_", "")
 
-        await state.update_data(target_conf_id=conf_id)
+        if conf_id not in confessions_db:
+
+            await message.answer("❌ Confession not found.")
+
+            return
+
+        await state.update_data(
+            target_conf_id=conf_id,
+            reply_to_comment=None
+        )
 
         await state.set_state(BotStates.waiting_for_comment)
 
         await message.answer(
-            f"✍️ **You are replying anonymously to Confession #{conf_id}.**\n\n"
-            f"Send your comment below:"
+            f"💬 Replying anonymously to Confession #{conf_id}\n\n"
+            f"Send your comment:"
         )
 
         return
 
+    # ==========================================
+    # REPLY TO COMMENT
+    # ==========================================
+
+    if len(args) > 1 and args[1].startswith("reply_"):
+
+        comment_id = args[1].replace("reply_", "")
+
+        comment_data = comments_db.get(comment_id)
+
+        if not comment_data:
+
+            await message.answer("❌ Comment not found.")
+
+            return
+
+        await state.update_data(
+            target_conf_id=comment_data["confession_id"],
+            reply_to_comment=comment_id
+        )
+
+        await state.set_state(BotStates.waiting_for_comment)
+
+        await message.answer(
+            "↩️ Send your anonymous reply:"
+        )
+
+        return
+
+    # ==========================================
     # NORMAL CONFESSION MODE
+    # ==========================================
+
     await state.set_state(BotStates.waiting_for_confession)
 
     await message.answer(
         "🤫 Welcome to WKU Confessions!\n\n"
-        "Send your confession text or photo anonymously."
+        "Send your anonymous confession text or photo."
     )
 
 # =========================================================
@@ -94,6 +148,7 @@ async def send_to_admins(message: types.Message):
     global confession_counter
 
     conf_id = str(confession_counter)
+
     confession_counter += 1
 
     text_content = message.text if message.text else message.caption
@@ -101,6 +156,7 @@ async def send_to_admins(message: types.Message):
     photo_id = None
 
     if message.photo:
+
         photo_id = message.photo[-1].file_id
 
     confessions_db[conf_id] = {
@@ -155,7 +211,7 @@ async def send_to_admins(message: types.Message):
         )
 
     await message.answer(
-        "📥 Your anonymous confession has been submitted for admin review."
+        "📥 Your confession has been submitted for review."
     )
 
 # =========================================================
@@ -163,15 +219,16 @@ async def send_to_admins(message: types.Message):
 # =========================================================
 
 @dp.message(F.chat.type == "private", F.text | F.photo)
-async def fallback_confession_handler(
+async def private_handler(
     message: types.Message,
     state: FSMContext
 ):
 
     current_state = await state.get_state()
 
-    # Ignore if currently commenting
+    # COMMENT MODE
     if current_state == BotStates.waiting_for_comment:
+
         return
 
     await send_to_admins(message)
@@ -179,7 +236,7 @@ async def fallback_confession_handler(
     await state.clear()
 
 # =========================================================
-# CREATE CHANNEL BUTTONS
+# CHANNEL BUTTONS
 # =========================================================
 
 def create_channel_keyboard(conf_id):
@@ -219,16 +276,17 @@ async def approve_callback(callback: types.CallbackQuery):
     data = confessions_db.get(conf_id)
 
     if not data:
+
         return
 
     post_text = (
-        f"📢 **WKU Confession #{conf_id}**\n\n"
+        f"📢 WKU Confession #{conf_id}\n\n"
         f"{data['text'] or ''}"
     )
 
     markup = create_channel_keyboard(conf_id)
 
-    # SEND TO CHANNEL
+    # SEND PHOTO POST
     if data["photo_id"]:
 
         sent = await bot.send_photo(
@@ -238,6 +296,7 @@ async def approve_callback(callback: types.CallbackQuery):
             reply_markup=markup
         )
 
+    # SEND TEXT POST
     else:
 
         sent = await bot.send_message(
@@ -246,15 +305,13 @@ async def approve_callback(callback: types.CallbackQuery):
             reply_markup=markup
         )
 
-    # SAVE CHANNEL MESSAGE ID
     data["channel_message_id"] = sent.message_id
 
     logging.info(
         f"Posted confession #{conf_id} "
-        f"to channel message ID {sent.message_id}"
+        f"-> Channel Message {sent.message_id}"
     )
 
-    # EDIT ADMIN MESSAGE
     try:
 
         if callback.message.photo:
@@ -270,6 +327,7 @@ async def approve_callback(callback: types.CallbackQuery):
             )
 
     except Exception as e:
+
         logging.error(e)
 
 # =========================================================
@@ -280,109 +338,139 @@ async def approve_callback(callback: types.CallbackQuery):
 async def reject_callback(callback: types.CallbackQuery):
 
     try:
+
         await callback.message.delete()
+
     except:
+
         pass
 
 # =========================================================
-# DETECT AUTO FORWARDED DISCUSSION MESSAGE
+# DETECT DISCUSSION AUTO FORWARD
 # =========================================================
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def catch_discussion_forward(message: types.Message):
+async def detect_discussion_forward(message: types.Message):
 
     try:
 
-        # Telegram automatic discussion forward
         if message.is_automatic_forward:
 
-            original_channel_message_id = message.forward_from_message_id
+            original_channel_msg_id = message.forward_from_message_id
 
             logging.info(
-                f"AUTO FORWARD DETECTED | "
-                f"Channel Msg ID: {original_channel_message_id} | "
-                f"Discussion Msg ID: {message.message_id}"
+                f"FORWARD DETECTED | "
+                f"Channel Msg {original_channel_msg_id} "
+                f"-> Discussion Msg {message.message_id}"
             )
 
-            # MATCH CONFESSION
             for conf_id, data in confessions_db.items():
 
-                if data.get("channel_message_id") == original_channel_message_id:
+                if data["channel_message_id"] == original_channel_msg_id:
 
                     data["discussion_chat_id"] = message.chat.id
 
                     data["discussion_message_id"] = message.message_id
 
                     logging.info(
-                        f"MATCHED Confession #{conf_id} "
-                        f"-> Discussion Message {message.message_id}"
+                        f"MATCHED Confession #{conf_id}"
                     )
 
                     return
 
     except Exception as e:
+
         logging.error(f"Discussion mapping error: {e}")
 
 # =========================================================
-# PROCESS ANONYMOUS COMMENT
+# PROCESS COMMENTS + REPLIES
 # =========================================================
 
 @dp.message(BotStates.waiting_for_comment, F.text)
-async def process_anonymous_comment(
+async def process_comment(
     message: types.Message,
     state: FSMContext
 ):
+
+    global comment_counter
 
     state_data = await state.get_data()
 
     conf_id = state_data.get("target_conf_id")
 
-    # WAIT FOR TELEGRAM DISCUSSION SYNC
+    reply_to_comment = state_data.get("reply_to_comment")
+
+    # WAIT FOR DISCUSSION SYNC
     for retry in range(10):
 
         data = confessions_db.get(conf_id)
 
         if data and data.get("discussion_message_id"):
-            break
 
-        logging.info(
-            f"Waiting for discussion sync "
-            f"for confession #{conf_id} "
-            f"(attempt {retry + 1})"
-        )
+            break
 
         await asyncio.sleep(1.5)
 
     data = confessions_db.get(conf_id)
 
-    # FAILED TO MAP
     if not data or not data.get("discussion_message_id"):
 
         await message.answer(
-            "⚠️ Post is still syncing with Telegram.\n"
-            "Please wait a few seconds and try again."
+            "⚠️ Telegram is syncing the post.\nTry again in a few seconds."
         )
 
         await state.clear()
 
         return
 
-    # SEND COMMENT
     try:
 
-        await bot.send_message(
+        # DEFAULT TARGET = MAIN POST
+        target_message_id = data["discussion_message_id"]
+
+        # REPLY TO COMMENT
+        if reply_to_comment:
+
+            target_message_id = comments_db[reply_to_comment]["message_id"]
+
+        # SEND MESSAGE
+        sent = await bot.send_message(
             chat_id=data["discussion_chat_id"],
-            text=f"💬 **Anonymous:**\n\n{message.text}",
-            reply_to_message_id=data["discussion_message_id"]
+            text=f"💬 Anonymous:\n\n{message.text}",
+            reply_to_message_id=target_message_id
+        )
+
+        # SAVE COMMENT
+        comment_id = str(comment_counter)
+
+        comments_db[comment_id] = {
+            "confession_id": conf_id,
+            "message_id": sent.message_id
+        }
+
+        comment_counter += 1
+
+        # ADD REPLY BUTTON
+        builder = InlineKeyboardBuilder()
+
+        builder.button(
+            text="↩️ Reply",
+            url=f"https://t.me/{BOT_USERNAME}?start=reply_{comment_id}"
+        )
+
+        await bot.edit_message_reply_markup(
+            chat_id=data["discussion_chat_id"],
+            message_id=sent.message_id,
+            reply_markup=builder.as_markup()
         )
 
         await message.answer(
-            "🚀 Your anonymous comment has been posted."
+            "✅ Anonymous comment posted."
         )
 
     except Exception as e:
 
-        logging.error(f"Comment posting error: {e}")
+        logging.error(e)
 
         await message.answer(
             "❌ Failed to post comment."
@@ -404,23 +492,25 @@ async def like_post(callback: types.CallbackQuery):
     data = confessions_db.get(conf_id)
 
     if not data:
+
         return
 
-    # REMOVE LIKE
     if user_id in data["liked_users"]:
 
         data["liked_users"].remove(user_id)
+
         data["likes"] -= 1
 
     else:
 
         data["liked_users"].add(user_id)
+
         data["likes"] += 1
 
-        # REMOVE DISLIKE
         if user_id in data["disliked_users"]:
 
             data["disliked_users"].remove(user_id)
+
             data["dislikes"] -= 1
 
     await bot.edit_message_reply_markup(
@@ -445,23 +535,25 @@ async def dislike_post(callback: types.CallbackQuery):
     data = confessions_db.get(conf_id)
 
     if not data:
+
         return
 
-    # REMOVE DISLIKE
     if user_id in data["disliked_users"]:
 
         data["disliked_users"].remove(user_id)
+
         data["dislikes"] -= 1
 
     else:
 
         data["disliked_users"].add(user_id)
+
         data["dislikes"] += 1
 
-        # REMOVE LIKE
         if user_id in data["liked_users"]:
 
             data["liked_users"].remove(user_id)
+
             data["likes"] -= 1
 
     await bot.edit_message_reply_markup(
@@ -473,7 +565,7 @@ async def dislike_post(callback: types.CallbackQuery):
     await callback.answer()
 
 # =========================================================
-# FASTAPI WEBHOOK
+# FASTAPI
 # =========================================================
 
 app = FastAPI()
@@ -486,8 +578,7 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 async def root():
 
     return {
-        "status": "alive",
-        "mode": "webhook"
+        "status": "alive"
     }
 
 @app.post(WEBHOOK_PATH)

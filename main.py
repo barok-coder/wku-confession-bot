@@ -22,9 +22,9 @@ CHANNEL_ID = "@wku_confessions_official"
 ADMIN_GROUP_ID = "@wku_admins_review_team"
 
 # YOUR REAL BOT USERNAME (NO @)
-BOT_USERNAME = "your_bot_username"
+BOT_USERNAME = "@wku_confessionsbot"
 
-RENDER_EXTERNAL_URL = "https://your-render-url.onrender.com"
+RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"
 
 logging.basicConfig(level=logging.INFO)
 

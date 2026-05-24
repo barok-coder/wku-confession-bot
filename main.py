@@ -14,13 +14,13 @@ import uvicorn
 
 # ================= CONFIG =================
 
-API_TOKEN = os.getenv("8857559349:AAFZMHIt2qM8GE7XVoxvWbPmSKHFooAa8Ng")
+API_TOKEN = os.getenv("API_TOKEN")
 
 CHANNEL_ID = "@wku_confessions_official"
 ADMIN_GROUP = -1003923693636   # your linked discussion group ID
 
 RENDER_URL = "https://wku-confession-bot-8aoc.onrender.com"
-WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 BOT_USERNAME = "wku_confessionsbot"
@@ -130,15 +130,20 @@ async def track_discussion(m: types.Message):
 # ================= COMMENT SYSTEM =================
 
 @dp.message(Command("start"))
-async def comment_entry(m: types.Message, state: FSMContext):
+async def start(m: types.Message, state: FSMContext):
     args = m.text.split()
 
     if len(args) > 1 and args[1].startswith("comment_"):
-        cid = int(args[1].replace("comment_", ""))
+        cid = int(args[1].split("_")[1])
         await state.update_data(conf_id=cid)
         await state.set_state(S.wait_comment)
         await m.answer("Send comment:")
         return
+
+    await state.clear()
+    await state.set_state(S.wait_conf)
+    await m.answer("Send confession anonymously.")
+
 
 @dp.message(S.wait_comment, F.text)
 async def comment(m: types.Message, state: FSMContext):

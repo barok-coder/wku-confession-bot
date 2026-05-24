@@ -211,23 +211,42 @@ async def dislike_post(callback: types.CallbackQuery):
     await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=data["channel_message_id"], reply_markup=create_channel_keyboard(conf_id))
     await callback.answer()
 
+# --- FASTAPI WEBHOOK CONFIGURATION ---
 app = FastAPI()
+
+# Replace this with your actual Render URL if it differs
+RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
 @app.get("/")
 def read_root():
-    return {"status": "alive"}
+    return {"status": "alive", "mode": "webhook"}
+
+@app.post(WEBHOOK_PATH)
+async def bot_webhook(update: dict):
+    """Feeds incoming Telegram updates directly into the aiogram dispatcher"""
+    telegram_update = types.Update.model_validate(update, context={"bot": bot})
+    await dp.feed_update(bot, telegram_update)
+    return {"status": "ok"}
 
 @app.on_event("startup")
-@app.on_event("startup")
 async def on_startup():
+    """Registers the webhook URL with Telegram on boot, instantly killing polling"""
     try:
-        # Forcefully terminate conflicting sessions and clear the line
-        await bot.delete_webhook(drop_pending_updates=True)
-        logging.info("🧹 Clear gateway! Terminated old ghost connections.")
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"]
+        )
+        logging.info(f"🚀 Webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
-        logging.error(f"Error dropping webhook: {e}")
-        
-    asyncio.create_task(dp.start_polling(bot))
+        logging.error(f"Failed to set webhook: {e}")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    """Cleans up connection on shutdown"""
+    await bot.session.close()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

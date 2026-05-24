@@ -1,59 +1,108 @@
 import asyncio
 import logging
 import os
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 from fastapi import FastAPI
 import uvicorn
 
-# --- CONFIG ---
+# =========================================================
+# CONFIG
+# =========================================================
+
 API_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = "@wku_confessions_official" 
-BOT_USERNAME = "wku_confessionsbot"
-ADMIN_GROUP_ID = "@wku_admins_review_team"  # Hardcoded channel link directly to avoid variable mismatch
+
+CHANNEL_ID = "@wku_confessions_official"
+BOT_USERNAME = "wku_confession_post"
+ADMIN_GROUP_ID = "@wku_admins_review_team"
+
+RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"
 
 logging.basicConfig(level=logging.INFO)
 
+# =========================================================
+# BOT SETUP
+# =========================================================
+
 bot = Bot(token=API_TOKEN)
+
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Dynamic Memory Stores
-confessions_db = {} 
+# =========================================================
+# DATABASE (TEMP MEMORY)
+# =========================================================
+
+confessions_db = {}
 confession_counter = 1
+
+# =========================================================
+# STATES
+# =========================================================
 
 class BotStates(StatesGroup):
     waiting_for_confession = State()
     waiting_for_comment = State()
 
+# =========================================================
+# START COMMAND
+# =========================================================
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+
     await state.clear()
+
     args = message.text.split()
-    
-    # Handle user clicking "+ Add Comment" from the channel
+
+    # COMMENT MODE
     if len(args) > 1 and args[1].startswith("comm_"):
+
         conf_id = args[1].replace("comm_", "")
+
         await state.update_data(target_conf_id=conf_id)
+
         await state.set_state(BotStates.waiting_for_comment)
-        await message.answer(f"✍️ **You are replying anonymously to Confession #{conf_id}.**\nSend your comment text below:")
+
+        await message.answer(
+            f"✍️ **You are replying anonymously to Confession #{conf_id}.**\n\n"
+            f"Send your comment below:"
+        )
+
         return
 
+    # NORMAL CONFESSION MODE
     await state.set_state(BotStates.waiting_for_confession)
-    await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo right here anonymously:")
+
+    await message.answer(
+        "🤫 Welcome to WKU Confessions!\n\n"
+        "Send your confession text or photo anonymously."
+    )
+
+# =========================================================
+# SEND CONFESSION TO ADMINS
+# =========================================================
 
 async def send_to_admins(message: types.Message):
+
     global confession_counter
+
     conf_id = str(confession_counter)
     confession_counter += 1
-    
+
     text_content = message.text if message.text else message.caption
-    photo_id = message.photo[-1].file_id if message.photo else None
-    
+
+    photo_id = None
+
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+
     confessions_db[conf_id] = {
         "text": text_content,
         "photo_id": photo_id,
@@ -65,189 +114,437 @@ async def send_to_admins(message: types.Message):
         "discussion_chat_id": None,
         "discussion_message_id": None
     }
-    
-    preview_text = text_content or "[Photo Content]"
-    admin_caption = f"🚨 **New Confession Submitted**\nID: #{conf_id}\n\n{preview_text}"
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Approve", callback_data=f"approve_{conf_id}")
-    builder.button(text="❌ Reject", callback_data=f"reject_{conf_id}")
-    
-    if photo_id:
-        await bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=photo_id, caption=admin_caption, reply_markup=builder.as_markup())
-    else:
-        await bot.send_message(chat_id=ADMIN_GROUP_ID, text=admin_caption, reply_markup=builder.as_markup())
-    await message.answer("📥 Your anonymous confession has been submitted for admin review!")
 
-# --- COGNITIVE COMMENT STATE HANDLER ---
-@dp.message(BotStates.waiting_for_comment, F.text)
-async def process_anonymous_comment(message: types.Message, state: FSMContext):
-    state_data = await state.get_data()
-    conf_id = state_data.get("target_conf_id")
-    
-    # Give Telegram up to 3 seconds to auto-forward the message to the group chat
-    for retry in range(3):
-        data = confessions_db.get(conf_id)
-        if data and data.get("discussion_message_id"):
-            break  # Post found! Break the loop and proceed
-        await asyncio.sleep(1) # Wait 1 second before checking memory again
-        
-    data = confessions_db.get(conf_id)
-    if not data or not data.get("discussion_message_id"):
-        await message.answer("⚠️ System syncing! Please wait a moment for the post to register and try again.")
-        await state.clear()
+    preview = text_content if text_content else "[Photo Content]"
+
+    admin_text = (
+        f"🚨 NEW CONFESSION\n\n"
+        f"ID: #{conf_id}\n\n"
+        f"{preview}"
+    )
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="✅ Approve",
+        callback_data=f"approve_{conf_id}"
+    )
+
+    builder.button(
+        text="❌ Reject",
+        callback_data=f"reject_{conf_id}"
+    )
+
+    markup = builder.as_markup()
+
+    if photo_id:
+
+        await bot.send_photo(
+            chat_id=ADMIN_GROUP_ID,
+            photo=photo_id,
+            caption=admin_text,
+            reply_markup=markup
+        )
+
+    else:
+
+        await bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=admin_text,
+            reply_markup=markup
+        )
+
+    await message.answer(
+        "📥 Your anonymous confession has been submitted for admin review."
+    )
+
+# =========================================================
+# PRIVATE CONFESSION HANDLER
+# =========================================================
+
+@dp.message(F.chat.type == "private", F.text | F.photo)
+async def fallback_confession_handler(
+    message: types.Message,
+    state: FSMContext
+):
+
+    current_state = await state.get_state()
+
+    # Ignore if currently commenting
+    if current_state == BotStates.waiting_for_comment:
         return
-    
+
+    await send_to_admins(message)
+
+    await state.clear()
+
+# =========================================================
+# CREATE CHANNEL BUTTONS
+# =========================================================
+
+def create_channel_keyboard(conf_id):
+
+    data = confessions_db[conf_id]
+
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="➕ Add Comment",
+        url=f"https://t.me/{BOT_USERNAME}?start=comm_{conf_id}"
+    )
+
+    builder.button(
+        text=f"👍 {data['likes']}",
+        callback_data=f"like_{conf_id}"
+    )
+
+    builder.button(
+        text=f"👎 {data['dislikes']}",
+        callback_data=f"dislike_{conf_id}"
+    )
+
+    builder.adjust(1, 2)
+
+    return builder.as_markup()
+
+# =========================================================
+# APPROVE CONFESSION
+# =========================================================
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve_callback(callback: types.CallbackQuery):
+
+    conf_id = callback.data.replace("approve_", "")
+
+    data = confessions_db.get(conf_id)
+
+    if not data:
+        return
+
+    post_text = (
+        f"📢 **WKU Confession #{conf_id}**\n\n"
+        f"{data['text'] or ''}"
+    )
+
+    markup = create_channel_keyboard(conf_id)
+
+    # SEND TO CHANNEL
+    if data["photo_id"]:
+
+        sent = await bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=data["photo_id"],
+            caption=post_text,
+            reply_markup=markup
+        )
+
+    else:
+
+        sent = await bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=post_text,
+            reply_markup=markup
+        )
+
+    # SAVE CHANNEL MESSAGE ID
+    data["channel_message_id"] = sent.message_id
+
+    logging.info(
+        f"Posted confession #{conf_id} "
+        f"to channel message ID {sent.message_id}"
+    )
+
+    # EDIT ADMIN MESSAGE
     try:
+
+        if callback.message.photo:
+
+            await callback.message.edit_caption(
+                caption=f"✅ Approved\n\nConfession #{conf_id}"
+            )
+
+        else:
+
+            await callback.message.edit_text(
+                text=f"✅ Approved\n\nConfession #{conf_id}"
+            )
+
+    except Exception as e:
+        logging.error(e)
+
+# =========================================================
+# REJECT CONFESSION
+# =========================================================
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_callback(callback: types.CallbackQuery):
+
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
+# =========================================================
+# DETECT AUTO FORWARDED DISCUSSION MESSAGE
+# =========================================================
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_discussion_forward(message: types.Message):
+
+    try:
+
+        # Telegram automatic discussion forward
+        if message.is_automatic_forward:
+
+            original_channel_message_id = message.forward_from_message_id
+
+            logging.info(
+                f"AUTO FORWARD DETECTED | "
+                f"Channel Msg ID: {original_channel_message_id} | "
+                f"Discussion Msg ID: {message.message_id}"
+            )
+
+            # MATCH CONFESSION
+            for conf_id, data in confessions_db.items():
+
+                if data.get("channel_message_id") == original_channel_message_id:
+
+                    data["discussion_chat_id"] = message.chat.id
+
+                    data["discussion_message_id"] = message.message_id
+
+                    logging.info(
+                        f"MATCHED Confession #{conf_id} "
+                        f"-> Discussion Message {message.message_id}"
+                    )
+
+                    return
+
+    except Exception as e:
+        logging.error(f"Discussion mapping error: {e}")
+
+# =========================================================
+# PROCESS ANONYMOUS COMMENT
+# =========================================================
+
+@dp.message(BotStates.waiting_for_comment, F.text)
+async def process_anonymous_comment(
+    message: types.Message,
+    state: FSMContext
+):
+
+    state_data = await state.get_data()
+
+    conf_id = state_data.get("target_conf_id")
+
+    # WAIT FOR TELEGRAM DISCUSSION SYNC
+    for retry in range(10):
+
+        data = confessions_db.get(conf_id)
+
+        if data and data.get("discussion_message_id"):
+            break
+
+        logging.info(
+            f"Waiting for discussion sync "
+            f"for confession #{conf_id} "
+            f"(attempt {retry + 1})"
+        )
+
+        await asyncio.sleep(1.5)
+
+    data = confessions_db.get(conf_id)
+
+    # FAILED TO MAP
+    if not data or not data.get("discussion_message_id"):
+
+        await message.answer(
+            "⚠️ Post is still syncing with Telegram.\n"
+            "Please wait a few seconds and try again."
+        )
+
+        await state.clear()
+
+        return
+
+    # SEND COMMENT
+    try:
+
         await bot.send_message(
             chat_id=data["discussion_chat_id"],
             text=f"💬 **Anonymous:**\n\n{message.text}",
             reply_to_message_id=data["discussion_message_id"]
         )
-        await message.answer("🚀 Your anonymous comment has been posted inside the replies drawer!")
+
+        await message.answer(
+            "🚀 Your anonymous comment has been posted."
+        )
+
     except Exception as e:
-        logging.error(f"Error dropping nested reply: {e}")
-        await message.answer("❌ Failed to post comment inside the channel's native feed.")
-        
+
+        logging.error(f"Comment posting error: {e}")
+
+        await message.answer(
+            "❌ Failed to post comment."
+        )
+
     await state.clear()
 
-# --- REPLIES INTERCEPTION FOR DISCUSSION GROUPS ---
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def catch_discussion_forward(message: types.Message):
-    """Intercepts the automatically forwarded post in the discussion group to map its ID"""
-    try:
-        if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
-            orig_msg_id = message.forward_from_message_id
-            
-            for conf_id, data in confessions_db.items():
-                if data.get("channel_message_id") == orig_msg_id:
-                    data["discussion_chat_id"] = message.chat.id
-                    data["discussion_message_id"] = message.message_id
-                    logging.info(f"🎯 MATCHED: Confession #{conf_id} linked to Group Message {message.message_id}")
-                    return
-    except Exception as e:
-        logging.error(f"Error mapping discussion chat forward: {e}")
-
-# --- CONFESSION FALLBACK HANDLING ---
-@dp.message(F.chat.type == "private", F.text | F.photo)
-async def fallback_confession_handler(message: types.Message, state: FSMContext):
-    await send_to_admins(message)
-    await state.clear()
-
-def create_channel_keyboard(conf_id):
-    data = confessions_db[conf_id]
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=comm_{conf_id}")
-    builder.button(text=f"👍 {data['likes']}", callback_data=f"like_{conf_id}")
-    builder.button(text=f"👎 {data['dislikes']}", callback_data=f"dislike_{conf_id}")
-    builder.adjust(1, 2)
-    return builder.as_markup()
-
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve_callback(callback: types.CallbackQuery):
-    conf_id = callback.data.replace("approve_", "")
-    data = confessions_db.get(conf_id)
-    if not data: return
-    
-    channel_post_text = f"📢 **WKU Confession #{conf_id}**\n\n{data['text'] or ''}"
-    markup = create_channel_keyboard(conf_id)
-    
-    if data["photo_id"]:
-        sent = await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text, reply_markup=markup)
-    else:
-        sent = await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text, reply_markup=markup)
-    
-    data["channel_message_id"] = sent.message_id
-    
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
-        else:
-            await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
-    except Exception:
-        pass
-
-@dp.callback_query(F.data.startswith("reject_"))
-async def reject_callback(callback: types.CallbackQuery):
-    await callback.message.delete()
+# =========================================================
+# LIKE SYSTEM
+# =========================================================
 
 @dp.callback_query(F.data.startswith("like_"))
 async def like_post(callback: types.CallbackQuery):
+
     conf_id = callback.data.replace("like_", "")
+
     user_id = callback.from_user.id
+
     data = confessions_db.get(conf_id)
-    if not data or not data["channel_message_id"]: return
-    
+
+    if not data:
+        return
+
+    # REMOVE LIKE
     if user_id in data["liked_users"]:
+
         data["liked_users"].remove(user_id)
         data["likes"] -= 1
+
     else:
+
         data["liked_users"].add(user_id)
         data["likes"] += 1
+
+        # REMOVE DISLIKE
         if user_id in data["disliked_users"]:
+
             data["disliked_users"].remove(user_id)
             data["dislikes"] -= 1
-            
-    await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=data["channel_message_id"], reply_markup=create_channel_keyboard(conf_id))
+
+    await bot.edit_message_reply_markup(
+        chat_id=CHANNEL_ID,
+        message_id=data["channel_message_id"],
+        reply_markup=create_channel_keyboard(conf_id)
+    )
+
     await callback.answer()
+
+# =========================================================
+# DISLIKE SYSTEM
+# =========================================================
 
 @dp.callback_query(F.data.startswith("dislike_"))
 async def dislike_post(callback: types.CallbackQuery):
+
     conf_id = callback.data.replace("dislike_", "")
+
     user_id = callback.from_user.id
+
     data = confessions_db.get(conf_id)
-    if not data or not data["channel_message_id"]: return
-    
+
+    if not data:
+        return
+
+    # REMOVE DISLIKE
     if user_id in data["disliked_users"]:
+
         data["disliked_users"].remove(user_id)
         data["dislikes"] -= 1
+
     else:
+
         data["disliked_users"].add(user_id)
         data["dislikes"] += 1
+
+        # REMOVE LIKE
         if user_id in data["liked_users"]:
+
             data["liked_users"].remove(user_id)
             data["likes"] -= 1
-            
-    await bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=data["channel_message_id"], reply_markup=create_channel_keyboard(conf_id))
+
+    await bot.edit_message_reply_markup(
+        chat_id=CHANNEL_ID,
+        message_id=data["channel_message_id"],
+        reply_markup=create_channel_keyboard(conf_id)
+    )
+
     await callback.answer()
 
-# --- FASTAPI WEBHOOK CONFIGURATION ---
+# =========================================================
+# FASTAPI WEBHOOK
+# =========================================================
+
 app = FastAPI()
 
-# Replace this with your actual Render URL if it differs
-RENDER_EXTERNAL_URL = "https://wku-confession-bot-8aoc.onrender.com"
 WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
 @app.get("/")
-def read_root():
-    return {"status": "alive", "mode": "webhook"}
+async def root():
+
+    return {
+        "status": "alive",
+        "mode": "webhook"
+    }
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(update: dict):
-    """Feeds incoming Telegram updates directly into the aiogram dispatcher"""
-    telegram_update = types.Update.model_validate(update, context={"bot": bot})
+
+    telegram_update = types.Update.model_validate(
+        update,
+        context={"bot": bot}
+    )
+
     await dp.feed_update(bot, telegram_update)
-    return {"status": "ok"}
+
+    return {"ok": True}
+
+# =========================================================
+# STARTUP
+# =========================================================
 
 @app.on_event("startup")
 async def on_startup():
-    """Registers the webhook URL with Telegram on boot, instantly killing polling"""
+
     try:
+
         await bot.set_webhook(
             url=WEBHOOK_URL,
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=[
+                "message",
+                "callback_query"
+            ]
         )
-        logging.info(f"🚀 Webhook successfully set to: {WEBHOOK_URL}")
+
+        logging.info(f"Webhook set: {WEBHOOK_URL}")
+
     except Exception as e:
-        logging.error(f"Failed to set webhook: {e}")
+
+        logging.error(f"Webhook setup failed: {e}")
+
+# =========================================================
+# SHUTDOWN
+# =========================================================
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    """Cleans up connection on shutdown"""
+
     await bot.session.close()
 
+# =========================================================
+# RUN SERVER
+# =========================================================
+
 if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )

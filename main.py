@@ -78,10 +78,27 @@ async def send_to_admins(message: types.Message):
         await bot.send_message(chat_id=ADMIN_GROUP_ID, text=admin_caption, reply_markup=builder.as_markup())
     await message.answer("📥 Sent to admins for review!")
 
-@dp.message(BotStates.waiting_for_confession, F.text | F.photo)
-async def process_confession_submission(message: types.Message, state: FSMContext):
-    await send_to_admins(message)
-    await state.clear()
+# --- REPLIES INTERCEPTION FOR DISCUSSION GROUPS ---
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_discussion_forward(message: types.Message):
+    """Intercepts the automatically forwarded post in the discussion group to map its ID"""
+    try:
+        # Check if this message was automatically forwarded from your confessions channel
+        if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
+            # The original message ID in the channel is what users click from
+            channel_msg_id = str(message.forward_from_message_id)
+            
+            # Find the confession in our database that matches this text/caption
+            text_to_check = message.text or message.caption or ""
+            
+            for conf_id, data in confessions_db.items():
+                if data["text"] and data["text"] in text_to_check:
+                    confumes_db[conf_id]["discussion_chat_id"] = message.chat.id
+                    confessions_db[conf_id]["discussion_message_id"] = message.message_id
+                    logging.info(f"🎯 Successfully matched Confession #{conf_id} to group message {message.message_id}")
+                    break
+    except Exception as e:
+        logging.error(f"Error mapping discussion chat forward: {e}")
 
 def create_channel_keyboard(conf_id):
     data = confessions_db[conf_id]

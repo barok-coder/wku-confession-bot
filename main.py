@@ -79,24 +79,22 @@ async def send_to_admins(message: types.Message):
     await message.answer("📥 Sent to admins for review!")
 
 # --- REPLIES INTERCEPTION FOR DISCUSSION GROUPS ---
+# This ensures it ONLY listens to group messages, never blocking user confessions
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_forward(message: types.Message):
-    """Intercepts the automatically forwarded post in the discussion group to map its ID"""
+    """Intercepts and maps the channel's automatically forwarded post inside the discussion group"""
     try:
-        # Check if this message was automatically forwarded from your confessions channel
+        # Check if this message was automatically forwarded from your channel
         if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
-            # The original message ID in the channel is what users click from
-            channel_msg_id = str(message.forward_from_message_id)
+            orig_msg_id = message.forward_from_message_id
             
-            # Find the confession in our database that matches this text/caption
-            text_to_check = message.text or message.caption or ""
-            
+            # Loop through our database to find the confession that matches this channel message ID
             for conf_id, data in confessions_db.items():
-                if data["text"] and data["text"] in text_to_check:
-                    confessions_db[conf_id]["discussion_chat_id"] = message.chat.id
-                    confessions_db[conf_id]["discussion_message_id"] = message.message_id
-                    logging.info(f"🎯 Successfully matched Confession #{conf_id} to group message {message.message_id}")
-                    break
+                if data.get("channel_message_id") == orig_msg_id:
+                    data["discussion_chat_id"] = message.chat.id
+                    data["discussion_message_id"] = message.message_id
+                    logging.info(f"🎯 MATCHED: Confession #{conf_id} linked to Group Message ID {message.message_id}")
+                    return
     except Exception as e:
         logging.error(f"Error mapping discussion chat forward: {e}")
 

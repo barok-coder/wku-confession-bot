@@ -11,21 +11,18 @@ from fastapi import FastAPI
 import uvicorn
 
 # --- CONFIG ---
-# This forces the bot to strictly look at your Render Environment setting
-API_TOKEN = os.environ.get("BOT_TOKEN") 
+API_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-
-# Handles usernames (@my_channel) and numbers cleanly
-ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID", "@wku_admins_review_team")
+ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID")
 
 logging.basicConfig(level=logging.INFO)
 
-# Setup Bot and explicit In-Memory storage for State management
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Dynamic Memory Stores
 confessions_db = {} 
 confession_counter = 1
 
@@ -36,17 +33,32 @@ class BotStates(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
-    if len(args) > 1 and args[1].startswith("reply_"):
-        conf_id = args[1].replace("reply_", "")
+    
+    # Handle user clicking "+ Add Comment" from the channel
+    if len(args) > 1 and args[1].startswith("comm_"):
+        conf_id = args[1].replace("comm_", "")
         await state.update_data(target_conf_id=conf_id)
         await state.set_state(BotStates.waiting_for_comment)
-        await message.answer(f"✍️ Replying anonymously to Confession #{conf_id}.\nSend your comment below:")
+        await message.answer(f"✍️ **You are replying anonymously to Confession #{conf_id}.**\nSend your comment text below:")
         return
-        
-    await state.set_state(BotStates.waiting_for_confession)
-    await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession as text or photo.")
 
-# Helper function to forward content to the admins
+    # Handle user clicking "Browse Comments" from the channel
+    if len(args) > 1 and args[1].startswith("view_"):
+        conf_id = args[1].replace("view_", "")
+        data = confessions_db.get(conf_id)
+        if not data or not data["comments"]:
+            await message.answer(f"💬 No comments on Confession #{conf_id} yet. Be the first!")
+            return
+        
+        comments_text = f"💬 **Comments for Confession #{conf_id}:**\n\n"
+        for idx, c in enumerate(data["comments"], 1):
+            comments_text += f"{idx}. {c}\n"
+        await message.answer(comments_text)
+        return
+
+    await state.set_state(BotStates.waiting_for_confession)
+    await message.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo right here anonymously:")
+
 async def send_to_admins(message: types.Message):
     global confession_counter
     conf_id = str(confession_counter)
@@ -58,11 +70,16 @@ async def send_to_admins(message: types.Message):
     confessions_db[conf_id] = {
         "text": text_content,
         "photo_id": photo_id,
-        "sender_id": message.from_user.id
+        "sender_id": message.from_user.id,
+        "likes": 0,
+        "dislikes": 0,
+        "comments": [],
+        "liked_users": set(),
+        "disliked_users": set()
     }
     
     preview_text = text_content or "[Photo Content]"
-    admin_caption = f"🚨 **New Confession**\nID: #{conf_id}\n\n{preview_text}"
+    admin_caption = f"🚨 **New Confession Submitted**\nID: #{conf_id}\n\n{preview_text}"
     
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Approve", callback_data=f"approve_{conf_id}")
@@ -72,13 +89,28 @@ async def send_to_admins(message: types.Message):
         await bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=photo_id, caption=admin_caption, reply_markup=builder.as_markup())
     else:
         await bot.send_message(chat_id=ADMIN_GROUP_ID, text=admin_caption, reply_markup=builder.as_markup())
-    await message.answer("📥 Sent to admins for review!")
+    await message.answer("📥 Your anonymous confession has been submitted for admin review!")
 
-# Catch conversations explicitly tracking the 'waiting_for_confession' state
 @dp.message(BotStates.waiting_for_confession, F.text | F.photo)
 async def process_confession_submission(message: types.Message, state: FSMContext):
     await send_to_admins(message)
     await state.clear()
+
+# Generates the custom interactive layout seen in the AAU bot screenshot
+def create_channel_keyboard(conf_id):
+    data = confessions_db[conf_id]
+    builder = InlineKeyboardBuilder()
+    
+    # Row 1: Interactive Engagement Elements
+    builder.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=comm_{conf_id}")
+    builder.button(text=f"📂 Browse Comments ({len(data['comments'])})", url=f"https://t.me/{BOT_USERNAME}?start=view_{conf_id}")
+    
+    # Row 2: Voting Systems
+    builder.button(text=f"👍 {data['likes']}", callback_data=f"like_{conf_id}")
+    builder.button(text=f"👎 {data['dislikes']}", callback_data=f"dislike_{conf_id}")
+    
+    builder.adjust(2, 2) # Arranges buttons neatly in rows of 2
+    return builder.as_markup()
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_callback(callback: types.CallbackQuery):
@@ -86,21 +118,19 @@ async def approve_callback(callback: types.CallbackQuery):
     data = confessions_db.get(conf_id)
     if not data: return
     
-    comment_builder = InlineKeyboardBuilder()
-    comment_builder.button(text="💬 Leave an Anonymous Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-    
     channel_post_text = f"📢 **WKU Confession #{conf_id}**\n\n{data['text'] or ''}"
-    if data["photo_id"]:
-        await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text, reply_markup=comment_builder.as_markup())
-    else:
-        await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text, reply_markup=comment_builder.as_markup())
+    markup = create_channel_keyboard(conf_id)
     
-    # Safely handle caption vs text edits in Admin Panel
+    if data["photo_id"]:
+        await bot.send_photo(chat_id=CHANNEL_ID, photo=data["photo_id"], caption=channel_post_text, reply_markup=markup)
+    else:
+        await bot.send_message(chat_id=CHANNEL_ID, text=channel_post_text, reply_markup=markup)
+    
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
+            await callback.message.edit_caption(caption=f"✅ Approved and Posted!\nID: #{conf_id}")
         else:
-            await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
+            await callback.message.edit_text(text=f"✅ Approved and Posted!\nID: #{conf_id}")
     except Exception:
         pass
 
@@ -108,23 +138,66 @@ async def approve_callback(callback: types.CallbackQuery):
 async def reject_callback(callback: types.CallbackQuery):
     await callback.message.delete()
 
+# --- VOTING LOGIC SYSTEM ---
+@dp.callback_query(F.data.startswith("like_"))
+async def like_post(callback: types.CallbackQuery):
+    conf_id = callback.data.replace("like_", "")
+    user_id = callback.from_user.id
+    data = confessions_db.get(conf_id)
+    if not data: return
+    
+    if user_id in data["liked_users"]:
+        data["liked_users"].remove(user_id)
+        data["likes"] -= 1
+    else:
+        data["liked_users"].add(user_id)
+        data["likes"] += 1
+        if user_id in data["disliked_users"]:
+            data["disliked_users"].remove(user_id)
+            data["dislikes"] -= 1
+            
+    await callback.message.edit_reply_markup(reply_markup=create_channel_keyboard(conf_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("dislike_"))
+async def dislike_post(callback: types.CallbackQuery):
+    conf_id = callback.data.replace("dislike_", "")
+    user_id = callback.from_user.id
+    data = confessions_db.get(conf_id)
+    if not data: return
+    
+    if user_id in data["disliked_users"]:
+        data["disliked_users"].remove(user_id)
+        data["dislikes"] -= 1
+    else:
+        data["disliked_users"].add(user_id)
+        data["dislikes"] += 1
+        if user_id in data["liked_users"]:
+            data["liked_users"].remove(user_id)
+            data["likes"] -= 1
+            
+    await callback.message.edit_reply_markup(reply_markup=create_channel_keyboard(conf_id))
+    await callback.answer()
+
 @dp.message(BotStates.waiting_for_comment, F.text)
 async def process_anonymous_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
     conf_id = state_data.get("target_conf_id")
-    comment_text = f"💬 **Anonymous Comment on #{conf_id}:**\n\n{message.text}"
-    await bot.send_message(chat_id=CHANNEL_ID, text=comment_text)
-    await message.answer("🚀 Comment published!")
+    data = confessions_db.get(conf_id)
+    
+    if data:
+        data["comments"].append(message.text)
+        await message.answer("🚀 Your anonymous comment has been recorded safely!")
+    else:
+        await message.answer("❌ Error locating that confession.")
+        
     await state.clear()
 
-# FAIL-SAFE ROUTER: Catches confessions if a user's state gets dropped out of memory
 @dp.message(F.text | F.photo)
 async def fallback_confession_handler(message: types.Message, state: FSMContext):
-    # Simply intercept text/images as a confession directly and clear state safely
     await send_to_admins(message)
     await state.clear()
 
-# Tiny Web Service so Render stays awake
 app = FastAPI()
 
 @app.get("/")

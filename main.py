@@ -10,11 +10,12 @@ import uvicorn
 import os
 
 # --- CONFIG ---
-# We use os.environ to keep your secret token safe on Render!
 API_TOKEN = os.environ.get("BOT_TOKEN", "8857559349:AAFGI_hxQ3MI04cFbHbzIIgh1QU-DGkuCJ4")
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-ADMIN_GROUP_ID = -1003905179562 # Put your real Admin numeric group ID here!
+
+# Dynamically loads your group ID from Render and safely handles the negative sign
+ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", -1003905179562))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)

@@ -138,12 +138,23 @@ async def reject_callback(callback: types.CallbackQuery):
     await callback.message.delete()
 
 # --- REPLIES INTERCEPTION FOR DISCUSSION GROUPS ---
-@dp.message(F.author_signature.startswith("📢 WKU Confession #") | F.forward_from_chat(username=CHANNEL_ID.replace("@", "")))
+@dp.message()
 async def catch_discussion_forward(message: types.Message):
-    """Automatically tracks whenever Telegram automatically copies your post to the Discussion Group"""
+    """Intercepts and maps the channel's automatically forwarded post inside the discussion group"""
     try:
-        text = message.text if message.text else message.caption
-        if not text: return
+        # Check if this message was automatically forwarded from your channel
+        if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
+            orig_msg_id = message.forward_from_message_id
+            
+            # Loop through our database to find the confession that matches this channel message ID
+            for conf_id, data in confessions_db.items():
+                if data.get("channel_message_id") == orig_msg_id:
+                    data["discussion_chat_id"] = message.chat.id
+                    data["discussion_message_id"] = message.message_id
+                    logging.info(f"🎯 MATCHED: Confession #{conf_id} linked to Group Message ID {message.message_id}")
+                    return
+    except Exception as e:
+        logging.error(f"Error mapping discussion chat forward: {e}")
         
         # Parse the dynamic confession ID out from the signature line
         first_line = text.split("\n")[0]

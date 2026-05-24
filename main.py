@@ -218,7 +218,15 @@ def read_root():
     return {"status": "alive"}
 
 @app.on_event("startup")
+@app.on_event("startup")
 async def on_startup():
+    try:
+        # Forcefully terminate conflicting sessions and clear the line
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("🧹 Clear gateway! Terminated old ghost connections.")
+    except Exception as e:
+        logging.error(f"Error dropping webhook: {e}")
+        
     asyncio.create_task(dp.start_polling(bot))
 
 if __name__ == "__main__":

@@ -84,8 +84,15 @@ async def send_to_admins(message: types.Message):
 async def process_anonymous_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
     conf_id = state_data.get("target_conf_id")
-    data = confessions_db.get(conf_id)
     
+    # Give Telegram up to 3 seconds to auto-forward the message to the group chat
+    for retry in range(3):
+        data = confessions_db.get(conf_id)
+        if data and data.get("discussion_message_id"):
+            break  # Post found! Break the loop and proceed
+        await asyncio.sleep(1) # Wait 1 second before checking memory again
+        
+    data = confessions_db.get(conf_id)
     if not data or not data.get("discussion_message_id"):
         await message.answer("⚠️ System syncing! Please wait a moment for the post to register and try again.")
         await state.clear()

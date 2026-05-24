@@ -574,7 +574,7 @@ WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
 
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
 
     return {

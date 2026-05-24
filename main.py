@@ -14,7 +14,8 @@ import uvicorn
 API_TOKEN = os.environ.get("BOT_TOKEN", "8857559349:AAFGI_hxQ3MI04cFbHbzIIgh1QU-DGkuCJ4")
 CHANNEL_ID = "@wku_confessions_official" 
 BOT_USERNAME = "wku_confessionsbot"
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", -1001234567890)) 
+# Handles both numbers (-100123) and channel handles (@my_admin_channel) safely!
+ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID", "@wku_admins_review_team")
 
 logging.basicConfig(level=logging.INFO)
 

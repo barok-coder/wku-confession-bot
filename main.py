@@ -93,7 +93,7 @@ async def catch_discussion_forward(message: types.Message):
             
             for conf_id, data in confessions_db.items():
                 if data["text"] and data["text"] in text_to_check:
-                    confumes_db[conf_id]["discussion_chat_id"] = message.chat.id
+                    confessions_db[conf_id]["discussion_chat_id"] = message.chat.id
                     confessions_db[conf_id]["discussion_message_id"] = message.message_id
                     logging.info(f"🎯 Successfully matched Confession #{conf_id} to group message {message.message_id}")
                     break

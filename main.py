@@ -95,12 +95,15 @@ app = FastAPI()
 def read_root():
     return {"status": "alive"}
 
-async def run_bot():
-    await dp.start_polling(bot)
+# Modernized startup routine
+@app.on_event("startup")
+async def on_startup():
+    # This creates a safe background task for the bot inside FastAPI's running event loop
+    asyncio.create_task(dp.start_polling(bot))
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
     # Render provides a specific port variable automatically
     port = int(os.environ.get("PORT", 10000))
+    # Let uvicorn handle the event loop completely
+    uvicorn.run(app, host="0.0.0.0", port=port)
     uvicorn.run(app, host="0.0.0.0", port=port)

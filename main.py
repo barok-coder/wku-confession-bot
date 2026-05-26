@@ -31,7 +31,6 @@ CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫"
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Crucial: Ensure this clean public channel name matches your channel's public link
 CHANNEL_PUBLIC_NAME = "wku_confessions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionsbot"
@@ -93,7 +92,6 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
     cursor = db.cursor()
     cursor.execute("SELECT fake_name FROM identity_map WHERE conf_id=? AND user_id=?", (conf_id, user_id))
     row = cursor.fetchone()
-
     if row:
         name = row[0]
     else:
@@ -110,62 +108,91 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
+
+    # Deep link: reply to a specific confession
     if len(args) > 1 and args[1].startswith("reply_"):
         try:
             conf_id = int(args[1].split("_")[1])
+            # Clear any previous state first, then set comment state
+            await state.clear()
             await state.update_data(target_conf_id=conf_id)
             await state.set_state(BotStates.writing_comment)
             identity = get_or_create_identity(conf_id, message.from_user.id)
-            await message.answer(f"🎭 Mask active: You are posting as **{identity}**.\n\nWrite your comment or reply below:")
+            await message.answer(
+                f"🎭 Mask active: You are posting as **{identity}**.\n\n"
+                f"Write your comment below and it will appear in the confession thread:"
+            )
             return
-        except Exception:
+        except Exception as e:
+            logging.error(f"Reply deep link error: {e}")
             await message.answer("⚠️ Broken reply reference link.")
             return
 
+    # Normal start — show category picker
     await state.clear()
     kb = InlineKeyboardBuilder()
     for cat in CATEGORIES:
         kb.button(text=cat, callback_data=f"select_cat:{cat}")
     kb.adjust(2)
-
     await state.set_state(BotStates.choosing_category)
-    await message.answer("Welcome to **WKU Confessions**! 🤫\nChoose a category for your submission:", reply_markup=kb.as_markup())
+    await message.answer(
+        "Welcome to **WKU Confessions**! 🤫\nChoose a category for your submission:",
+        reply_markup=kb.as_markup()
+    )
 
 @dp.callback_query(BotStates.choosing_category, F.data.startswith("select_cat:"))
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
     selected_cat = callback.data.split(":")[1]
     await state.update_data(chosen_category=selected_cat)
     await state.set_state(BotStates.writing_confession)
-    await callback.message.edit_text(f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):")
+    await callback.message.edit_text(
+        f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):"
+    )
     await callback.answer()
 
 # ================= 6. REDDIT-STYLE NESTED THREAD COMMENTS =================
-@dp.message(BotStates.writing_comment, F.text, F.chat.type == "private")
+# NOTE: This handler MUST be defined before fallback_private so aiogram matches it first
+@dp.message(BotStates.writing_comment, F.chat.type == "private")
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
     conf_id = state_data.get("target_conf_id")
 
+    if not conf_id:
+        await message.answer("⚠️ Session lost. Please use the reply link again.")
+        await state.clear()
+        return
+
+    # Poll DB up to 5 times waiting for sync (1s apart)
     row = None
-    for _ in range(4):
+    for attempt in range(5):
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (conf_id,))
+        cursor.execute(
+            "SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?",
+            (conf_id,)
+        )
         row = cursor.fetchone()
         db.close()
         if row and row[0] and row[1]:
             break
-        await asyncio.sleep(1)
+        logging.info(f"Waiting for sync... attempt {attempt + 1}/5 for conf_id={conf_id}")
+        await asyncio.sleep(1.5)
 
     if not row or not row[0] or not row[1]:
-        await message.answer("⚠️ Thread synchronization processing active. Try again in 5 seconds.")
-        await state.clear()
+        await message.answer(
+            "⚠️ The confession thread hasn't synced yet. Please wait ~10 seconds and try the reply link again.\n\n"
+            "_(This happens when Telegram hasn't mirrored the post to the discussion group yet.)_"
+        )
+        # Do NOT clear state — let user retry by sending message again
         return
 
     disc_chat_id, disc_msg_id = row[0], row[1]
     identity = get_or_create_identity(conf_id, message.from_user.id)
 
     try:
+        # Always reply to the original mirrored post as the thread root
         parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
+
         sent = await bot.send_message(
             chat_id=disc_chat_id,
             text=f"💬 **{identity}**:\n\n{message.text}",
@@ -174,15 +201,21 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
 
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)", (conf_id, disc_chat_id, sent.message_id))
+        cursor.execute(
+            "INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)",
+            (conf_id, disc_chat_id, sent.message_id)
+        )
         db.commit()
         db.close()
 
-        await message.answer("🚀 Your anonymous reply has been woven into the post's comment thread!")
-    except Exception as e:
-        logging.error(f"Nested thread posting crash: {e}")
-        await message.answer("❌ Error routing thread reply to Telegram.")
+        await message.answer("🚀 Your anonymous comment has been posted to the confession thread!")
+        logging.info(f"✅ Comment posted for conf_id={conf_id} by identity={identity}")
 
+    except Exception as e:
+        logging.error(f"Thread comment posting error: {e}")
+        await message.answer("❌ Failed to post your comment. Please try again.")
+
+    # Only clear state after successful post (or hard failure)
     await state.clear()
 
 # ================= 7. SUBMISSION PROCESSING =================
@@ -241,17 +274,28 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
 
+# ================= 8. FALLBACK (must be LAST private handler) =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
+    # If user is in writing_comment state, do NOT override — let the state handler above deal with it
+    current_state = await state.get_state()
+    if current_state == BotStates.writing_comment.state:
+        # Re-route to comment handler manually (safety net)
+        await process_threaded_comment(message, state)
+        return
+
     await state.clear()
     kb = InlineKeyboardBuilder()
     for cat in CATEGORIES:
         kb.button(text=cat, callback_data=f"select_cat:{cat}")
     kb.adjust(2)
     await state.set_state(BotStates.choosing_category)
-    await message.answer("Let's get your submission ready! 🤫\nChoose a category for your confession:", reply_markup=kb.as_markup())
+    await message.answer(
+        "Let's get your submission ready! 🤫\nChoose a category for your confession:",
+        reply_markup=kb.as_markup()
+    )
 
-# ================= 8. ADM MODERATION & REACTION GRID SYSTEM =================
+# ================= 9. ADM MODERATION & REACTION GRID SYSTEM =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -291,9 +335,13 @@ async def approve_confession(callback: types.CallbackQuery):
     kb.adjust(2, 2)
 
     try:
-        await bot.edit_message_reply_markup(chat_id=CHANNEL_USERNAME, message_id=out.message_id, reply_markup=kb.as_markup())
+        await bot.edit_message_reply_markup(
+            chat_id=CHANNEL_USERNAME,
+            message_id=out.message_id,
+            reply_markup=kb.as_markup()
+        )
     except Exception as e:
-        logging.error(f"Failed updating initial channel view markup: {e}")
+        logging.error(f"Failed updating channel markup: {e}")
 
     try:
         if callback.message.photo or callback.message.video:
@@ -342,13 +390,13 @@ async def handle_reactions(callback: types.CallbackQuery):
     except Exception:
         await callback.answer("Processing error.")
 
-# ================= 9. SYSTEM SYNC & THREADED DISCUSSIONS (FIXED) =================
+# ================= 10. SYSTEM SYNC & THREADED DISCUSSIONS (FIXED) =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
         orig_msg_id = None
 
-        # Method 1: Legacy forward_from_chat (older Bot API versions)
+        # Method 1: Legacy forward_from_chat (older Bot API)
         if message.forward_from_chat:
             fc = message.forward_from_chat
             if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
@@ -387,7 +435,7 @@ async def catch_discussion_mirror(message: types.Message):
     except Exception as e:
         logging.error(f"Sync intercept error: {e}")
 
-# ================= 10. LIFESPAN MANAGEMENT SYSTEM =================
+# ================= 11. LIFESPAN MANAGEMENT SYSTEM =================
 token_string = os.getenv("API_TOKEN", "")
 STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
 

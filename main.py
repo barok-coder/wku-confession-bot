@@ -4,6 +4,7 @@ import os
 import sqlite3
 import random
 import threading
+from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,13 +16,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from fastapi import FastAPI, Request
 import uvicorn
 
+# Set up logging early to catch everything
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 # ================= 1. SYSTEM CONFIGURATION =================
 
 API_TOKEN = os.getenv("API_TOKEN")
 RENDER_URL = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
 
+# Explicit loud checks to avoid silent status 1 exits
 if not API_TOKEN:
-    raise RuntimeError("CRITICAL ERROR: API_TOKEN environment variable is missing!")
+    logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' variable is missing in Render settings!")
+    raise RuntimeError("Missing API_TOKEN")
 
 CHANNEL_USERNAME = "@wku_confessions_official"
 ADMIN_GROUP_ID = -1003923693636
@@ -30,9 +36,7 @@ WEBHOOK_PATH = f"/webhook/{API_TOKEN[:10]}"
 WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 BOT_USERNAME = "wku_confessionsbot"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Initialize Engine
+# Initialize Engine Components
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -46,7 +50,6 @@ def init_db():
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
         
-        # Confessions Vault
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS confessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +65,6 @@ def init_db():
         )
         """)
         
-        # Threaded Identity Mapping
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS identity_map (
             conf_id INTEGER,
@@ -72,7 +74,6 @@ def init_db():
         )
         """)
         
-        # Nested Comment History
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +89,7 @@ init_db()
 
 def get_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")  # Render optimization for fast SQLite reading
+    conn.execute("PRAGMA journal_mode=WAL;") 
     return conn
 
 # ================= 3. ANONYMOUS IDENTITY ENGINE =================
@@ -129,14 +130,12 @@ CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫"
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
     
-    # Reddit Thread Comment Deep-link Routing
     if len(args) > 1 and args[1].startswith("reply_"):
         try:
             conf_id = int(args[1].split("_")[1])
             await state.update_data(target_conf_id=conf_id)
             await state.set_state(BotStates.writing_comment)
             
-            # Generate or fetch masked user name
             identity = get_or_create_identity(conf_id, message.from_user.id)
             await message.answer(f"🎭 Mask active: You are posting as **{identity}**.\n\nWrite your comment or reply below:")
             return
@@ -163,7 +162,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
 
 # ================= 6. SUBMISSION PROCESSING =================
 
-@dp.message(BotStates.writing_confession, F.chat.type == "private", F.text | F.photo | F.video)
+@dp.message(BotStates.writing_confession, F.chat.type == "private", (F.text | F.photo | F.video))
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("chosen_category", "General 📝")
@@ -188,12 +187,12 @@ async def handle_submission(message: types.Message, state: FSMContext):
     db.commit()
     db.close()
     
-    # Render Admin Verification Card
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Approve", callback_data=f"adm_approve:{conf_id}")
     kb.button(text="❌ Reject", callback_data=f"adm_reject:{conf_id}")
     
-    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{text}"
+    display_text = text if text else "Media Attachment File"
+    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{display_text}"
     
     try:
         if file_type == "photo":
@@ -225,8 +224,6 @@ async def approve_confession(callback: types.CallbackQuery):
         return
         
     text, file_id, file_type, category = row
-    
-    # Render Public Layout & Sub-menus
     public_text = f"📢 **WKU Confession #{conf_id}**\n🏷️ Category: {category}\n\n{text}"
     
     kb = InlineKeyboardBuilder()
@@ -247,7 +244,7 @@ async def approve_confession(callback: types.CallbackQuery):
     db.close()
     
     try:
-        await callback.message.edit_caption(caption=f"✅ Approved via pipeline!\nID: #{conf_id}") if callback.message.photo or callback.message.video else await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
+        await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}") if callback.message.photo or callback.message.video else await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
     except Exception:
         pass
     await callback.answer("Broadcast complete.")
@@ -267,7 +264,6 @@ async def handle_reactions(callback: types.CallbackQuery):
     
     db = get_db()
     cursor = db.cursor()
-    
     if r_type == "like":
         cursor.execute("UPDATE confessions SET likes = likes + 1 WHERE id=?", (conf_id,))
     else:
@@ -294,7 +290,6 @@ async def handle_reactions(callback: types.CallbackQuery):
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
-    """Hooks into automatic channel cloning event inside your public discussion chat"""
     try:
         if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_USERNAME.replace("@", ""):
             orig_msg_id = message.forward_from_message_id
@@ -318,7 +313,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
     conf_id = state_data.get("target_conf_id")
     
-    # Multi-second asynchronous loop buffer to ensure synchronization
     row = None
     for _ in range(4):
         db = get_db()
@@ -339,10 +333,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     identity = get_or_create_identity(conf_id, message.from_user.id)
     
     try:
-        # Check if the user is replying to a specific comment tree context inside the bot
         parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
-        
-        # Route directly inside the native comment drawer
         sent = await bot.send_message(
             chat_id=disc_chat_id,
             text=f"💬 **{identity}**:\n\n{message.text}",
@@ -362,13 +353,27 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         
     await state.clear()
 
-# ================= 10. FASTAPI WEBHOOK PIPELINE =================
+# ================= 10. MODERN LIFESPAN AND PIPELINE =================
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern context pipeline manager optimized for Python 3.14 lifecycle rules"""
+    logging.info("🏁 Hooking up Webhook pipelines...")
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
+    logging.info(f"🚀 Live secure gateway locked onto: {WEBHOOK_URL}")
+    yield
+    logging.info("🛑 Severing connections and closing sessions...")
+    await bot.session.close()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
-    return {"status": "operational", "mode": "webhook_active", "engine": "aiogram3"}
+    return {"status": "operational", "engine": "aiogram3", "runtime": "python3.14"}
 
 @app.post(WEBHOOK_PATH)
 async def process_webhook_payload(request: Request):
@@ -377,23 +382,8 @@ async def process_webhook_payload(request: Request):
         update = types.Update.model_validate(payload, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        logging.error(f"Webhook execution failure: {e}")
+        logging.error(f"Webhook tracking pipeline fault: {e}")
     return {"ok": True}
-
-@app.on_event("startup")
-async def on_startup():
-    logging.info("Initializing Render container boots...")
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"]
-    )
-    logging.info(f"🚀 Webhook pipeline locked and loaded onto target URL: {WEBHOOK_URL}")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    logging.info("Closing down environment tunnels...")
-    await bot.session.close()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))

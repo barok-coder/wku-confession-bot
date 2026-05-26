@@ -147,7 +147,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     
     row = None
     for _ in range(4):
-        db = get_get = get_db()
+        db = get_db()
         cursor = db.cursor()
         cursor.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (conf_id,))
         row = cursor.fetchone()
@@ -370,31 +370,45 @@ async def lifespan(app: FastAPI):
     global bot
     token = os.getenv("API_TOKEN")
     url = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
+    
     if not token:
+        logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' missing at instantiation runtime!")
         raise RuntimeError("Missing API_TOKEN")
+        
     bot = Bot(token=token)
     target_webhook_url = f"{url}/webhook/{token[:10]}"
-    await bot.set_webhook(url=target_webhook_url, drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+    
+    logging.info("🏁 Connecting webhook pipelines...")
+    await bot.set_webhook(
+        url=target_webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
+    logging.info(f"🚀 Live secure gateway locked onto: {target_webhook_url}")
+    
     yield
+    logging.info("🛑 Severing gateway connections...")
     if bot:
         await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post(STATIC_WEBHOOK_PATH)
-async def process_webhook_payload(request: Request):
-    if bot is not None:
-        try:
-            payload = await request.json()
-            update = types.Update.model_validate(payload, context={"bot": bot})
-            await dp.feed_update(bot, update)
-        except Exception:
-            pass
-    return {"ok": True}
-
 @app.get("/")
 def read_root():
     return {"status": "operational", "engine": "aiogram3"}
 
+@app.post(STATIC_WEBHOOK_PATH)
+async def process_webhook_payload(request: Request):
+    if bot is None:
+        return {"ok": False, "error": "Bot not initialized yet"}
+    try:
+        payload = await request.json()
+        update = types.Update.model_validate(payload, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logging.error(f"Webhook tracking execution error: {e}")
+    return {"ok": True}
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), factory=False)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, factory=False)

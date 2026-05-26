@@ -93,7 +93,7 @@ async def start(m: types.Message, state: FSMContext):
 
 # ================= SAVE & FORWARD TO ADMINS =================
 
-@dp.message(S.wait_conf, F.chat.type == "private", F.text | F.photo)
+@dp.message(S.wait_conf, F.chat.type == "private", (F.text | F.photo))
 async def save_conf(m: types.Message):
     text = m.text or m.caption
     photo = m.photo[-1].file_id if m.photo else None
@@ -111,12 +111,17 @@ async def save_conf(m: types.Message):
     kb.button(text="✅ Approve", callback_data=f"approve_{cid}")
     kb.button(text="❌ Reject", callback_data=f"reject_{cid}")
     
-    admin_text = f"🚨 **New Confession Submitted**\nID: #{cid}\n\n{text or '[Photo]'}"
+    # If it's a pure photo, make sure text isn't empty None
+    display_text = text if text else "📷 [Photo Confession]"
+    admin_text = f"🚨 **New Confession Submitted**\nID: #{cid}\n\n{display_text}"
 
-    if photo:
-        await bot.send_photo(ADMIN_GROUP, photo, caption=admin_text, reply_markup=kb.as_markup())
-    else:
-        await bot.send_message(ADMIN_GROUP, text=admin_text, reply_markup=kb.as_markup())
+    try:
+        if photo:
+            await bot.send_photo(ADMIN_GROUP, photo, caption=admin_text, reply_markup=kb.as_markup())
+        else:
+            await bot.send_message(ADMIN_GROUP, text=admin_text, reply_markup=kb.as_markup())
+    except Exception as e:
+        logging.error(f"Failed sending layout to Admin Group: {e}")
 
     await m.answer("📥 Your anonymous confession has been submitted for admin review!")
 

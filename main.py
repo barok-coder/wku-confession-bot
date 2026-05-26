@@ -4,6 +4,7 @@ import os
 import sqlite3
 import random
 import threading
+from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,31 +16,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from fastapi import FastAPI, Request
 import uvicorn
 
-# Initialize Logging Engine
+# Initialize Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ================= 1. SYSTEM CONFIGURATION =================
-
-API_TOKEN = os.getenv("API_TOKEN")
-RENDER_URL = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
-
-if not API_TOKEN:
-    logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' variable is missing in Render environment!")
-    raise RuntimeError("Missing API_TOKEN")
+# ================= 1. FORWARD GLOBALS =================
+bot: Bot = None
+dp: Dispatcher = None
 
 CHANNEL_USERNAME = "@wku_confessions_official"
 ADMIN_GROUP_ID = -1003923693636
-
-WEBHOOK_PATH = f"/webhook/{API_TOKEN[:10]}"
-WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 BOT_USERNAME = "wku_confessionsbot"
 
-# Instantiate Engine Elements
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
 # ================= 2. ANTI-CRASH PERSISTENT DATABASE =================
-
 DB_FILE = "confessions.db"
 db_lock = threading.Lock()
 
@@ -47,7 +35,6 @@ def init_db():
     with db_lock:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = conn.cursor()
-        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS confessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +49,6 @@ def init_db():
             dislikes INTEGER DEFAULT 0
         )
         """)
-        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS identity_map (
             conf_id INTEGER,
@@ -71,7 +57,6 @@ def init_db():
             PRIMARY KEY (conf_id, user_id)
         )
         """)
-        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +76,6 @@ def get_db():
     return conn
 
 # ================= 3. ANONYMOUS IDENTITY ENGINE =================
-
 ANIMALS = ["Lion", "Fox", "Cheetah", "Owl", "Eagle", "Wolf", "Hawk", "Panther", "Leopard", "Shark"]
 ADJECTIVES = ["WKU_Senior", "Freshman", "Anonymous", "Hidden", "Shadow", "Silent", "Mysterious", "Clever"]
 
@@ -114,7 +98,6 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
     return name
 
 # ================= 4. FINITE STATE MACHINE (FSM) =================
-
 class BotStates(StatesGroup):
     choosing_category = State()
     writing_confession = State()
@@ -122,18 +105,18 @@ class BotStates(StatesGroup):
 
 CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫", "Shoutout 🗣️", "Funny 😂"]
 
-# ================= 5. USER FLOW & INTAKE =================
+# Initialize Dispatcher Handlers Router
+dp = Dispatcher(storage=MemoryStorage())
 
+# ================= 5. USER FLOW & INTAKE =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
-    
     if len(args) > 1 and args[1].startswith("reply_"):
         try:
             conf_id = int(args[1].split("_")[1])
             await state.update_data(target_conf_id=conf_id)
             await state.set_state(BotStates.writing_comment)
-            
             identity = get_or_create_identity(conf_id, message.from_user.id)
             await message.answer(f"🎭 Mask active: You are posting as **{identity}**.\n\nWrite your comment or reply below:")
             return
@@ -158,8 +141,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):")
     await callback.answer()
 
-# ================= 6. SUBMISSION PROCESSING (FIXED MEDIA HANDLING) =================
-
+# ================= 6. SUBMISSION PROCESSING =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -203,13 +185,12 @@ async def handle_submission(message: types.Message, state: FSMContext):
         else:
             await bot.send_message(ADMIN_GROUP_ID, text=admin_caption, reply_markup=kb.as_markup())
     except Exception as e:
-        logging.error(f"❌ Target send validation failure to Admin Group: {e}")
+        logging.error(f"❌ Verification send failure to Admin Group: {e}")
 
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
 
 # ================= 7. ADM MODERATION & REACTIONS =================
-
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -291,7 +272,6 @@ async def handle_reactions(callback: types.CallbackQuery):
         await callback.answer("Processing error.")
 
 # ================= 8. SYSTEM SYNC & THREADED DISCUSSIONS =================
-
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
@@ -311,7 +291,6 @@ async def catch_discussion_mirror(message: types.Message):
         logging.error(f"Sync intercept error: {e}")
 
 # ================= 9. REDDIT-STYLE NESTED THREAD COMMENTS =================
-
 @dp.message(BotStates.writing_comment, F.text)
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
@@ -357,16 +336,46 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         
     await state.clear()
 
-# ================= 10. FASTAPI APP ENTRYWAY (STABLE RUNNER) =================
+# ================= 10. LIFESPAN MANAGEMENT SYSTEM =================
+WEBHOOK_PATH = None
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global bot, WEBHOOK_PATH
+    
+    token = os.getenv("API_TOKEN")
+    url = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
+    
+    if not token:
+        logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' missing at instantiation runtime!")
+        raise RuntimeError("Missing API_TOKEN")
+        
+    # Instantiate engine cleanly on runtime load
+    bot = Bot(token=token)
+    WEBHOOK_PATH = f"/webhook/{token[:10]}"
+    target_webhook_url = f"{url}/webhook/{token[:10]}"
+    
+    logging.info("🏁 Connecting webhook pipelines...")
+    await bot.set_webhook(
+        url=target_webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
+    logging.info(f"🚀 Live secure gateway locked onto: {target_webhook_url}")
+    
+    yield
+    logging.info("🛑 Severing gateway connections...")
+    if bot:
+        await bot.session.close()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def read_root():
     return {"status": "operational", "engine": "aiogram3"}
 
-@app.post(WEBHOOK_PATH)
-async def process_webhook_payload(request: Request):
+@app.post("/webhook/{token_prefix}")
+async def process_webhook_payload(token_prefix: str, request: Request):
     try:
         payload = await request.json()
         update = types.Update.model_validate(payload, context={"bot": bot})
@@ -374,19 +383,6 @@ async def process_webhook_payload(request: Request):
     except Exception as e:
         logging.error(f"Webhook tracking execution error: {e}")
     return {"ok": True}
-
-# Simple setup handlers for Render execution
-async def setup_webhook():
-    logging.info("🏁 Connecting webhook pipelines...")
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"]
-    )
-    logging.info(f"🚀 Live secure gateway locked onto: {WEBHOOK_URL}")
-
-# Spin up initialization background routine safely
-asyncio.get_event_loop().create_task(setup_webhook())
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -137,7 +137,53 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):")
     await callback.answer()
 
-# ================= 6. SUBMISSION PROCESSING (DYNAMIC ENV MATCHING) =================
+# ================= 6. REDDIT-STYLE NESTED THREAD COMMENTS (MOVED HIGHER) =================
+@dp.message(BotStates.writing_comment, F.text, F.chat.type == "private")
+async def process_threaded_comment(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    conf_id = state_data.get("target_conf_id")
+    
+    row = None
+    for _ in range(4):
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (conf_id,))
+        row = cursor.fetchone()
+        db.close()
+        if row and row[0] and row[1]:
+            break
+        await asyncio.sleep(1)
+        
+    if not row or not row[0] or not row[1]:
+        await message.answer("⚠️ Thread synchronization processing active. Try again in 5 seconds.")
+        await state.clear()
+        return
+        
+    disc_chat_id, disc_msg_id = row[0], row[1]
+    identity = get_or_create_identity(conf_id, message.from_user.id)
+    
+    try:
+        parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
+        sent = await bot.send_message(
+            chat_id=disc_chat_id,
+            text=f"💬 **{identity}**:\n\n{message.text}",
+            reply_to_message_id=parent_reply_id
+        )
+        
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)", (conf_id, disc_chat_id, sent.message_id))
+        db.commit()
+        db.close()
+        
+        await message.answer("🚀 Your anonymous reply has been woven into the post's comment thread!")
+    except Exception as e:
+        logging.error(f"Nested thread posting crash: {e}")
+        await message.answer("❌ Error routing thread reply to Telegram.")
+        
+    await state.clear()
+
+# ================= 7. SUBMISSION PROCESSING =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -157,7 +203,6 @@ async def handle_submission(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Unrecognized format. Please submit text, standard photo, or a video.")
         return
 
-    # Dynamic fallback check to find the Admin Group configuration cleanly
     env_admin_id = os.getenv("ADMIN_GROUP_ID", "-1003923693636")
     try:
         admin_chat_target = int(env_admin_id)
@@ -194,6 +239,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
 
+# Global fallback ONLY triggers if the user has no active state
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     await state.clear()
@@ -204,7 +250,7 @@ async def fallback_private(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.choosing_category)
     await message.answer("Let's get your submission ready! 🤫\nChoose a category for your confession:", reply_markup=kb.as_markup())
 
-# ================= 7. ADM MODERATION & REACTIONS =================
+# ================= 8. ADM MODERATION & REACTIONS =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -285,7 +331,7 @@ async def handle_reactions(callback: types.CallbackQuery):
     except Exception:
         await callback.answer("Processing error.")
 
-# ================= 8. SYSTEM SYNC & THREADED DISCUSSIONS =================
+# ================= 9. SYSTEM SYNC & THREADED DISCUSSIONS =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
@@ -303,52 +349,6 @@ async def catch_discussion_mirror(message: types.Message):
             logging.info(f"🎯 SYSTEM SYNC: Linked Channel Post #{orig_msg_id} to Group Chat Thread {message.message_id}")
     except Exception as e:
         logging.error(f"Sync intercept error: {e}")
-
-# ================= 9. REDDIT-STYLE NESTED THREAD COMMENTS =================
-@dp.message(BotStates.writing_comment, F.text)
-async def process_threaded_comment(message: types.Message, state: FSMContext):
-    state_data = await state.get_data()
-    conf_id = state_data.get("target_conf_id")
-    
-    row = None
-    for _ in range(4):
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (conf_id,))
-        row = cursor.fetchone()
-        db.close()
-        if row and row[0] and row[1]:
-            break
-        await asyncio.sleep(1)
-        
-    if not row or not row[0] or not row[1]:
-        await message.answer("⚠️ Thread synchronization processing active. Try again in 5 seconds.")
-        await state.clear()
-        return
-        
-    disc_chat_id, disc_msg_id = row[0], row[1]
-    identity = get_or_create_identity(conf_id, message.from_user.id)
-    
-    try:
-        parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
-        sent = await bot.send_message(
-            chat_id=disc_chat_id,
-            text=f"💬 **{identity}**:\n\n{message.text}",
-            reply_to_message_id=parent_reply_id
-        )
-        
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)", (conf_id, disc_chat_id, sent.message_id))
-        db.commit()
-        db.close()
-        
-        await message.answer("🚀 Your anonymous reply has been woven into the post's comment thread!")
-    except Exception as e:
-        logging.error(f"Nested thread posting crash: {e}")
-        await message.answer("❌ Error routing thread reply to Telegram.")
-        
-    await state.clear()
 
 # ================= 10. LIFESPAN MANAGEMENT SYSTEM =================
 token_string = os.getenv("API_TOKEN", "")

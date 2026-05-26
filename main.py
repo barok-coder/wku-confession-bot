@@ -19,15 +19,23 @@ import uvicorn
 # Initialize Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ================= 1. FORWARD GLOBALS =================
+# ================= 1. DEFINE SYSTEM STATES =================
+class BotStates(StatesGroup):
+    choosing_category = State()
+    writing_confession = State()
+    writing_comment = State()
+
+CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫", "Shoutout 🗣️", "Funny 😂"]
+
+# ================= 2. INITIALIZE GLOBAL OBJECTS ONCE =================
 bot: Bot = None
-dp: Dispatcher = None
+dp = Dispatcher(storage=MemoryStorage())  # Crucial: Singleton instantiation
 
 CHANNEL_USERNAME = "@wku_confessions_official"
 ADMIN_GROUP_ID = -1003923693636
 BOT_USERNAME = "wku_confessionsbot"
 
-# ================= 2. ANTI-CRASH PERSISTENT DATABASE =================
+# ================= 3. ANTI-CRASH PERSISTENT DATABASE =================
 DB_FILE = "confessions.db"
 db_lock = threading.Lock()
 
@@ -75,7 +83,7 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL;") 
     return conn
 
-# ================= 3. ANONYMOUS IDENTITY ENGINE =================
+# ================= 4. ANONYMOUS IDENTITY ENGINE =================
 ANIMALS = ["Lion", "Fox", "Cheetah", "Owl", "Eagle", "Wolf", "Hawk", "Panther", "Leopard", "Shark"]
 ADJECTIVES = ["WKU_Senior", "Freshman", "Anonymous", "Hidden", "Shadow", "Silent", "Mysterious", "Clever"]
 
@@ -96,17 +104,6 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
             pass
     db.close()
     return name
-
-# ================= 4. FINITE STATE MACHINE (FSM) =================
-class BotStates(StatesGroup):
-    choosing_category = State()
-    writing_confession = State()
-    writing_comment = State()
-
-CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫", "Shoutout 🗣️", "Funny 😂"]
-
-# Initialize Dispatcher Handlers Router
-dp = Dispatcher(storage=MemoryStorage())
 
 # ================= 5. USER FLOW & INTAKE =================
 @dp.message(Command("start"))
@@ -158,7 +155,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
         file_type = "video"
         
     if not text and not file_id:
-        await message.answer("⚠️ Unrecognized document format. Please submit text, standard photo, or a video.")
+        await message.answer("⚠️ Unrecognized format. Please submit text, standard photo, or a video.")
         return
 
     db = get_db()
@@ -184,8 +181,9 @@ async def handle_submission(message: types.Message, state: FSMContext):
             await bot.send_video(ADMIN_GROUP_ID, file_id, caption=admin_caption, reply_markup=kb.as_markup())
         else:
             await bot.send_message(ADMIN_GROUP_ID, text=admin_caption, reply_markup=kb.as_markup())
+        logging.info(f"📬 Sent confession #{conf_id} to admin group.")
     except Exception as e:
-        logging.error(f"❌ Verification send failure to Admin Group: {e}")
+        logging.error(f"❌ Failed forwarding confession to Admin Group: {e}")
 
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
@@ -350,7 +348,6 @@ async def lifespan(app: FastAPI):
         logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' missing at instantiation runtime!")
         raise RuntimeError("Missing API_TOKEN")
         
-    # Instantiate engine cleanly on runtime load
     bot = Bot(token=token)
     WEBHOOK_PATH = f"/webhook/{token[:10]}"
     target_webhook_url = f"{url}/webhook/{token[:10]}"

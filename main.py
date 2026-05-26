@@ -32,7 +32,7 @@ bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
 # Crucial: Ensure this clean public channel name matches your channel's public link
-CHANNEL_PUBLIC_NAME = "wku_confessions_official" 
+CHANNEL_PUBLIC_NAME = "wku_confessions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionsbot"
 
@@ -81,7 +81,7 @@ init_db()
 
 def get_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;") 
+    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 # ================= 4. ANONYMOUS IDENTITY ENGINE =================
@@ -93,7 +93,7 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
     cursor = db.cursor()
     cursor.execute("SELECT fake_name FROM identity_map WHERE conf_id=? AND user_id=?", (conf_id, user_id))
     row = cursor.fetchone()
-    
+
     if row:
         name = row[0]
     else:
@@ -127,7 +127,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     for cat in CATEGORIES:
         kb.button(text=cat, callback_data=f"select_cat:{cat}")
     kb.adjust(2)
-    
+
     await state.set_state(BotStates.choosing_category)
     await message.answer("Welcome to **WKU Confessions**! 🤫\nChoose a category for your submission:", reply_markup=kb.as_markup())
 
@@ -144,7 +144,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
     conf_id = state_data.get("target_conf_id")
-    
+
     row = None
     for _ in range(4):
         db = get_db()
@@ -155,15 +155,15 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         if row and row[0] and row[1]:
             break
         await asyncio.sleep(1)
-        
+
     if not row or not row[0] or not row[1]:
         await message.answer("⚠️ Thread synchronization processing active. Try again in 5 seconds.")
         await state.clear()
         return
-        
+
     disc_chat_id, disc_msg_id = row[0], row[1]
     identity = get_or_create_identity(conf_id, message.from_user.id)
-    
+
     try:
         parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
         sent = await bot.send_message(
@@ -171,18 +171,18 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             text=f"💬 **{identity}**:\n\n{message.text}",
             reply_to_message_id=parent_reply_id
         )
-        
+
         db = get_db()
         cursor = db.cursor()
         cursor.execute("INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)", (conf_id, disc_chat_id, sent.message_id))
         db.commit()
         db.close()
-        
+
         await message.answer("🚀 Your anonymous reply has been woven into the post's comment thread!")
     except Exception as e:
         logging.error(f"Nested thread posting crash: {e}")
         await message.answer("❌ Error routing thread reply to Telegram.")
-        
+
     await state.clear()
 
 # ================= 7. SUBMISSION PROCESSING =================
@@ -190,17 +190,17 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("chosen_category", "General 📝")
-    
+
     text = message.text or message.caption or ""
     file_id, file_type = None, None
-    
+
     if message.photo:
         file_id = message.photo[-1].file_id
         file_type = "photo"
     elif message.video:
         file_id = message.video.file_id
         file_type = "video"
-        
+
     if not text and not file_id:
         await message.answer("⚠️ Unrecognized format. Please submit text, standard photo, or a video.")
         return
@@ -220,13 +220,13 @@ async def handle_submission(message: types.Message, state: FSMContext):
     conf_id = cursor.lastrowid
     db.commit()
     db.close()
-    
+
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Approve", callback_data=f"adm_approve:{conf_id}")
     kb.button(text="❌ Reject", callback_data=f"adm_reject:{conf_id}")
-    
+
     admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{text}"
-    
+
     try:
         if file_type == "photo":
             await bot.send_photo(chat_id=admin_chat_target, photo=file_id, caption=admin_caption, reply_markup=kb.as_markup())
@@ -255,46 +255,46 @@ async def fallback_private(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
-    
+
     db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT text, file_id, file_type, category FROM confessions WHERE id=?", (conf_id,))
     row = cursor.fetchone()
-    
+
     if not row:
         await callback.answer("Confession missing from database.")
         db.close()
         return
-        
+
     text, file_id, file_type, category = row
     public_text = f"📢 **WKU Confession #{conf_id}**\n🏷️ Category: {category}\n\n{text}"
-    
+
     kb_placeholder = InlineKeyboardBuilder()
     kb_placeholder.button(text="⏳ Syncing View System...", callback_data="placeholder_sync")
-    
+
     if file_type == "photo":
         out = await bot.send_photo(CHANNEL_USERNAME, file_id, caption=public_text, reply_markup=kb_placeholder.as_markup())
     elif file_type == "video":
         out = await bot.send_video(CHANNEL_USERNAME, file_id, caption=public_text, reply_markup=kb_placeholder.as_markup())
     else:
         out = await bot.send_message(CHANNEL_USERNAME, text=public_text, reply_markup=kb_placeholder.as_markup())
-        
+
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
     db.close()
-    
+
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
     kb.button(text="💬 See Comments", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{out.message_id}?comment=1")
     kb.button(text="👍 0", callback_data=f"react:like:{conf_id}")
     kb.button(text="👎 0", callback_data=f"react:dislike:{conf_id}")
-    kb.adjust(2, 2) 
-    
+    kb.adjust(2, 2)
+
     try:
         await bot.edit_message_reply_markup(chat_id=CHANNEL_USERNAME, message_id=out.message_id, reply_markup=kb.as_markup())
     except Exception as e:
         logging.error(f"Failed updating initial channel view markup: {e}")
-    
+
     try:
         if callback.message.photo or callback.message.video:
             await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
@@ -316,7 +316,7 @@ async def reject_confession(callback: types.CallbackQuery):
 async def handle_reactions(callback: types.CallbackQuery):
     _, r_type, conf_id = callback.data.split(":")
     conf_id = int(conf_id)
-    
+
     db = get_db()
     cursor = db.cursor()
     if r_type == "like":
@@ -324,40 +324,66 @@ async def handle_reactions(callback: types.CallbackQuery):
     else:
         cursor.execute("UPDATE confessions SET dislikes = dislikes + 1 WHERE id=?", (conf_id,))
     db.commit()
-    
+
     cursor.execute("SELECT likes, dislikes, channel_msg_id FROM confessions WHERE id=?", (conf_id,))
     likes, dislikes, channel_msg_id = cursor.fetchone()
     db.close()
-    
+
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
     kb.button(text="💬 See Comments", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
     kb.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
     kb.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
     kb.adjust(2, 2)
-    
+
     try:
         await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
         await callback.answer("Reaction updated!")
     except Exception:
         await callback.answer("Processing error.")
 
-# ================= 9. SYSTEM SYNC & THREADED DISCUSSIONS =================
+# ================= 9. SYSTEM SYNC & THREADED DISCUSSIONS (FIXED) =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
-        if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_PUBLIC_NAME:
-            orig_msg_id = message.forward_from_message_id
-            
+        orig_msg_id = None
+
+        # Method 1: Legacy forward_from_chat (older Bot API versions)
+        if message.forward_from_chat:
+            fc = message.forward_from_chat
+            if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
+                orig_msg_id = message.forward_from_message_id
+                logging.info(f"🔎 Sync Method 1 matched: orig_msg_id={orig_msg_id}")
+
+        # Method 2: forward_origin (Bot API 7.0+ — MessageOriginChannel)
+        if not orig_msg_id and message.forward_origin:
+            fo = message.forward_origin
+            if hasattr(fo, "chat") and hasattr(fo, "message_id"):
+                chat_username = getattr(fo.chat, "username", "") or ""
+                if chat_username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
+                    orig_msg_id = fo.message_id
+                    logging.info(f"🔎 Sync Method 2 matched: orig_msg_id={orig_msg_id}")
+
+        if orig_msg_id:
             db = get_db()
             cursor = db.cursor()
             cursor.execute(
                 "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE channel_msg_id=?",
                 (message.chat.id, message.message_id, orig_msg_id)
             )
+            rows_affected = cursor.rowcount
             db.commit()
             db.close()
-            logging.info(f"🎯 SYSTEM SYNC: Linked Channel Post #{orig_msg_id} to Group Chat Thread {message.message_id}")
+            logging.info(
+                f"🎯 SYSTEM SYNC: Linked Channel Post #{orig_msg_id} → "
+                f"Group Thread {message.message_id} in chat {message.chat.id} "
+                f"(rows updated: {rows_affected})"
+            )
+        else:
+            logging.debug(
+                f"Non-sync group message ignored: chat={message.chat.id} msg={message.message_id}"
+            )
+
     except Exception as e:
         logging.error(f"Sync intercept error: {e}")
 
@@ -374,7 +400,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Missing API_TOKEN")
     bot = Bot(token=token)
     target_webhook_url = f"{url}/webhook/{token[:10]}"
-    await bot.set_webhook(url=target_webhook_url, drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+    await bot.set_webhook(
+        url=target_webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
     yield
     if bot:
         await bot.session.close()

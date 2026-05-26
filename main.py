@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 import uvicorn
 
 # Initialize Logging
@@ -27,9 +27,9 @@ class BotStates(StatesGroup):
 
 CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫", "Shoutout 🗣️", "Funny 😂"]
 
-# ================= 2. INITIALIZE GLOBAL OBJECTS ONCE =================
+# ================= 2. INITIALIZE GLOBAL OBJECTS =================
 bot: Bot = None
-dp = Dispatcher(storage=MemoryStorage())  # Crucial: Singleton instantiation
+dp = Dispatcher(storage=MemoryStorage())
 
 CHANNEL_USERNAME = "@wku_confessions_official"
 ADMIN_GROUP_ID = -1003923693636
@@ -188,6 +188,17 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
 
+# fallback handler for messages sent without typing /start first
+@dp.message(F.chat.type == "private")
+async def fallback_private(message: types.Message, state: FSMContext):
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    for cat in CATEGORIES:
+        kb.button(text=cat, callback_data=f"select_cat:{cat}")
+    kb.adjust(2)
+    await state.set_state(BotStates.choosing_category)
+    await message.answer("Let's get your submission ready! 🤫\nChoose a category for your confession:", reply_markup=kb.as_markup())
+
 # ================= 7. ADM MODERATION & REACTIONS =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
@@ -335,12 +346,12 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ================= 10. LIFESPAN MANAGEMENT SYSTEM =================
-WEBHOOK_PATH = None
+token_string = os.getenv("API_TOKEN", "")
+STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot, WEBHOOK_PATH
-    
+    global bot
     token = os.getenv("API_TOKEN")
     url = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
     
@@ -349,7 +360,6 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Missing API_TOKEN")
         
     bot = Bot(token=token)
-    WEBHOOK_PATH = f"/webhook/{token[:10]}"
     target_webhook_url = f"{url}/webhook/{token[:10]}"
     
     logging.info("🏁 Connecting webhook pipelines...")
@@ -371,8 +381,10 @@ app = FastAPI(lifespan=lifespan)
 def read_root():
     return {"status": "operational", "engine": "aiogram3"}
 
-@app.post("/webhook/{token_prefix}")
-async def process_webhook_payload(token_prefix: str, request: Request):
+@app.post(STATIC_WEBHOOK_PATH)
+async def process_webhook_payload(request: Request):
+    if bot is None:
+        return {"ok": False, "error": "Bot not initialized yet"}
     try:
         payload = await request.json()
         update = types.Update.model_validate(payload, context={"bot": bot})

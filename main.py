@@ -151,7 +151,6 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ================= 6. REDDIT-STYLE NESTED THREAD COMMENTS =================
-# NOTE: This handler MUST be defined before fallback_private so aiogram matches it first
 @dp.message(BotStates.writing_comment, F.chat.type == "private")
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
@@ -162,9 +161,9 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Poll DB up to 5 times waiting for sync (1s apart)
+    # Poll DB up to 6 times waiting for sync (1.5s apart)
     row = None
-    for attempt in range(5):
+    for attempt in range(6):
         db = get_db()
         cursor = db.cursor()
         cursor.execute(
@@ -175,7 +174,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db.close()
         if row and row[0] and row[1]:
             break
-        logging.info(f"Waiting for sync... attempt {attempt + 1}/5 for conf_id={conf_id}")
+        logging.info(f"Waiting for sync... attempt {attempt + 1}/6 for conf_id={conf_id}")
         await asyncio.sleep(1.5)
 
     if not row or not row[0] or not row[1]:
@@ -183,14 +182,12 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             "⚠️ The confession thread hasn't synced yet. Please wait ~10 seconds and try the reply link again.\n\n"
             "_(This happens when Telegram hasn't mirrored the post to the discussion group yet.)_"
         )
-        # Do NOT clear state — let user retry by sending message again
         return
 
     disc_chat_id, disc_msg_id = row[0], row[1]
     identity = get_or_create_identity(conf_id, message.from_user.id)
 
     try:
-        # Always reply to the original mirrored post as the thread root
         parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
 
         sent = await bot.send_message(
@@ -215,7 +212,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         logging.error(f"Thread comment posting error: {e}")
         await message.answer("❌ Failed to post your comment. Please try again.")
 
-    # Only clear state after successful post (or hard failure)
     await state.clear()
 
 # ================= 7. SUBMISSION PROCESSING =================
@@ -277,10 +273,8 @@ async def handle_submission(message: types.Message, state: FSMContext):
 # ================= 8. FALLBACK (must be LAST private handler) =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
-    # If user is in writing_comment state, do NOT override — let the state handler above deal with it
     current_state = await state.get_state()
     if current_state == BotStates.writing_comment.state:
-        # Re-route to comment handler manually (safety net)
         await process_threaded_comment(message, state)
         return
 
@@ -390,27 +384,26 @@ async def handle_reactions(callback: types.CallbackQuery):
     except Exception:
         await callback.answer("Processing error.")
 
-# ================= 10. SYSTEM SYNC & THREADED DISCUSSIONS (FIXED) =================
+# ================= 10. SYSTEM SYNC & THREADED DISCUSSIONS (REBUILT FOR ROBUSTNESS) =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
         orig_msg_id = None
 
-        # Method 1: Legacy forward_from_chat (older Bot API)
-        if message.forward_from_chat:
-            fc = message.forward_from_chat
-            if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
+        # Method 1: Check if this is explicitly an automatic forward from a channel
+        if message.is_automatic_forward:
+            if message.forward_origin and message.forward_origin.type == "channel":
+                orig_msg_id = message.forward_origin.message_id
+            elif message.forward_from_chat:
                 orig_msg_id = message.forward_from_message_id
-                logging.info(f"🔎 Sync Method 1 matched: orig_msg_id={orig_msg_id}")
 
-        # Method 2: forward_origin (Bot API 7.0+ — MessageOriginChannel)
+        # Method 2: Fallback username checks in case standard flags are absent
         if not orig_msg_id and message.forward_origin:
             fo = message.forward_origin
-            if hasattr(fo, "chat") and hasattr(fo, "message_id"):
+            if fo.type == "channel" and hasattr(fo, "chat"):
                 chat_username = getattr(fo.chat, "username", "") or ""
                 if chat_username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
                     orig_msg_id = fo.message_id
-                    logging.info(f"🔎 Sync Method 2 matched: orig_msg_id={orig_msg_id}")
 
         if orig_msg_id:
             db = get_db()

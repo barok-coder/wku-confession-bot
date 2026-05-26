@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 import uvicorn
 
 # Initialize Logging
@@ -32,7 +32,6 @@ bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
 CHANNEL_USERNAME = "@wku_confessions_official"
-ADMIN_GROUP_ID = -1003923693636
 BOT_USERNAME = "wku_confessionsbot"
 
 # ================= 3. ANTI-CRASH PERSISTENT DATABASE =================
@@ -138,7 +137,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):")
     await callback.answer()
 
-# ================= 6. SUBMISSION PROCESSING =================
+# ================= 6. SUBMISSION PROCESSING (DYNAMIC ENV MATCHING) =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -158,6 +157,13 @@ async def handle_submission(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Unrecognized format. Please submit text, standard photo, or a video.")
         return
 
+    # Dynamic fallback check to find the Admin Group configuration cleanly
+    env_admin_id = os.getenv("ADMIN_GROUP_ID", "-1003923693636")
+    try:
+        admin_chat_target = int(env_admin_id)
+    except ValueError:
+        admin_chat_target = env_admin_id
+
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -176,19 +182,18 @@ async def handle_submission(message: types.Message, state: FSMContext):
     
     try:
         if file_type == "photo":
-            await bot.send_photo(ADMIN_GROUP_ID, file_id, caption=admin_caption, reply_markup=kb.as_markup())
+            await bot.send_photo(chat_id=admin_chat_target, photo=file_id, caption=admin_caption, reply_markup=kb.as_markup())
         elif file_type == "video":
-            await bot.send_video(ADMIN_GROUP_ID, file_id, caption=admin_caption, reply_markup=kb.as_markup())
+            await bot.send_video(chat_id=admin_chat_target, video=file_id, caption=admin_caption, reply_markup=kb.as_markup())
         else:
-            await bot.send_message(ADMIN_GROUP_ID, text=admin_caption, reply_markup=kb.as_markup())
-        logging.info(f"📬 Sent confession #{conf_id} to admin group.")
+            await bot.send_message(chat_id=admin_chat_target, text=admin_caption, reply_markup=kb.as_markup())
+        logging.info(f"📬 Sent confession #{conf_id} to admin chat {admin_chat_target}.")
     except Exception as e:
         logging.error(f"❌ Failed forwarding confession to Admin Group: {e}")
 
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
 
-# fallback handler for messages sent without typing /start first
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     await state.clear()

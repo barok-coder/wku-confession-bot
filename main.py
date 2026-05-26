@@ -4,7 +4,6 @@ import os
 import sqlite3
 import random
 import threading
-from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from fastapi import FastAPI, Request
 import uvicorn
 
-# Set up logging early to catch everything
+# Initialize Logging Engine
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ================= 1. SYSTEM CONFIGURATION =================
@@ -24,9 +23,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 API_TOKEN = os.getenv("API_TOKEN")
 RENDER_URL = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
 
-# Explicit loud checks to avoid silent status 1 exits
 if not API_TOKEN:
-    logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' variable is missing in Render settings!")
+    logging.critical("❌ DEPLOYMENT CRASH: 'API_TOKEN' variable is missing in Render environment!")
     raise RuntimeError("Missing API_TOKEN")
 
 CHANNEL_USERNAME = "@wku_confessions_official"
@@ -36,7 +34,7 @@ WEBHOOK_PATH = f"/webhook/{API_TOKEN[:10]}"
 WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 BOT_USERNAME = "wku_confessionsbot"
 
-# Initialize Engine Components
+# Instantiate Engine Elements
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -160,9 +158,9 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"Selected Category: **{selected_cat}**\n\nNow, type your confession or send your media (Photo / Video):")
     await callback.answer()
 
-# ================= 6. SUBMISSION PROCESSING =================
+# ================= 6. SUBMISSION PROCESSING (FIXED MEDIA HANDLING) =================
 
-@dp.message(BotStates.writing_confession, F.chat.type == "private", (F.text | F.photo | F.video))
+@dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("chosen_category", "General 📝")
@@ -177,6 +175,10 @@ async def handle_submission(message: types.Message, state: FSMContext):
         file_id = message.video.file_id
         file_type = "video"
         
+    if not text and not file_id:
+        await message.answer("⚠️ Unrecognized document format. Please submit text, standard photo, or a video.")
+        return
+
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -191,8 +193,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     kb.button(text="✅ Approve", callback_data=f"adm_approve:{conf_id}")
     kb.button(text="❌ Reject", callback_data=f"adm_reject:{conf_id}")
     
-    display_text = text if text else "Media Attachment File"
-    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{display_text}"
+    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{text}"
     
     try:
         if file_type == "photo":
@@ -202,7 +203,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
         else:
             await bot.send_message(ADMIN_GROUP_ID, text=admin_caption, reply_markup=kb.as_markup())
     except Exception as e:
-        logging.error(f"Admin forward failed: {e}")
+        logging.error(f"❌ Target send validation failure to Admin Group: {e}")
 
     await message.answer("📥 Submitted anonymously! It is currently in the admin moderation review queue.")
     await state.clear()
@@ -219,7 +220,7 @@ async def approve_confession(callback: types.CallbackQuery):
     row = cursor.fetchone()
     
     if not row:
-        await callback.answer("Confession payload missing.")
+        await callback.answer("Confession missing from database.")
         db.close()
         return
         
@@ -244,7 +245,10 @@ async def approve_confession(callback: types.CallbackQuery):
     db.close()
     
     try:
-        await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}") if callback.message.photo or callback.message.video else await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
+        if callback.message.photo or callback.message.video:
+            await callback.message.edit_caption(caption=f"✅ Approved!\nID: #{conf_id}")
+        else:
+            await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
     except Exception:
         pass
     await callback.answer("Broadcast complete.")
@@ -353,27 +357,13 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         
     await state.clear()
 
-# ================= 10. MODERN LIFESPAN AND PIPELINE =================
+# ================= 10. FASTAPI APP ENTRYWAY (STABLE RUNNER) =================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Modern context pipeline manager optimized for Python 3.14 lifecycle rules"""
-    logging.info("🏁 Hooking up Webhook pipelines...")
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"]
-    )
-    logging.info(f"🚀 Live secure gateway locked onto: {WEBHOOK_URL}")
-    yield
-    logging.info("🛑 Severing connections and closing sessions...")
-    await bot.session.close()
+app = FastAPI()
 
-app = FastAPI(lifespan=lifespan)
-
-@app.api_route("/", methods=["GET", "HEAD"])
-async def health_check():
-    return {"status": "operational", "engine": "aiogram3", "runtime": "python3.14"}
+@app.get("/")
+def read_root():
+    return {"status": "operational", "engine": "aiogram3"}
 
 @app.post(WEBHOOK_PATH)
 async def process_webhook_payload(request: Request):
@@ -382,9 +372,22 @@ async def process_webhook_payload(request: Request):
         update = types.Update.model_validate(payload, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        logging.error(f"Webhook tracking pipeline fault: {e}")
+        logging.error(f"Webhook tracking execution error: {e}")
     return {"ok": True}
 
+# Simple setup handlers for Render execution
+async def setup_webhook():
+    logging.info("🏁 Connecting webhook pipelines...")
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
+    logging.info(f"🚀 Live secure gateway locked onto: {WEBHOOK_URL}")
+
+# Spin up initialization background routine safely
+asyncio.get_event_loop().create_task(setup_webhook())
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, factory=False)

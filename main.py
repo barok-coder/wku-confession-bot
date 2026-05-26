@@ -22,7 +22,7 @@ if not API_TOKEN:
     raise RuntimeError("API_TOKEN is missing in environment variables")
 
 CHANNEL_ID = "@wku_confessions_official"
-ADMIN_GROUP = -1003923693636  # Review Group/Channel
+ADMIN_ID = 123456789  # <--- REPLACE THIS with your personal Telegram User ID
 RENDER_URL = "https://wku-confession-bot-8aoc.onrender.com"
 
 WEBHOOK_PATH = "/webhook"
@@ -91,7 +91,7 @@ async def start(m: types.Message, state: FSMContext):
     await state.set_state(S.wait_conf)
     await m.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo right here anonymously:")
 
-# ================= SAVE & FORWARD TO ADMINS =================
+# ================= SAVE & FORWARD TO ADMIN PRIVATELY =================
 
 @dp.message(S.wait_conf, F.chat.type == "private", (F.text | F.photo))
 async def save_conf(m: types.Message):
@@ -106,22 +106,21 @@ async def save_conf(m: types.Message):
         cid = cur.lastrowid
         db.commit()
 
-    # Build Admin Review Card
+    # Build Admin Review Card for your Private Chat
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Approve", callback_data=f"approve_{cid}")
     kb.button(text="❌ Reject", callback_data=f"reject_{cid}")
     
-    # If it's a pure photo, make sure text isn't empty None
     display_text = text if text else "📷 [Photo Confession]"
     admin_text = f"🚨 **New Confession Submitted**\nID: #{cid}\n\n{display_text}"
 
     try:
         if photo:
-            await bot.send_photo(ADMIN_GROUP, photo, caption=admin_text, reply_markup=kb.as_markup())
+            await bot.send_photo(ADMIN_ID, photo, caption=admin_text, reply_markup=kb.as_markup())
         else:
-            await bot.send_message(ADMIN_GROUP, text=admin_text, reply_markup=kb.as_markup())
+            await bot.send_message(ADMIN_ID, text=admin_text, reply_markup=kb.as_markup())
     except Exception as e:
-        logging.error(f"Failed sending layout to Admin Group: {e}")
+        logging.error(f"Failed sending layout to Admin ID: {e}")
 
     await m.answer("📥 Your anonymous confession has been submitted for admin review!")
 
@@ -175,7 +174,6 @@ async def reject(c: types.CallbackQuery):
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_forward(m: types.Message):
-    """Intercepts the automatically cloned channel post inside your discussion group"""
     try:
         if m.forward_from_chat and m.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
             orig_msg_id = m.forward_from_message_id
@@ -199,7 +197,6 @@ async def comment(m: types.Message, state: FSMContext):
         await m.answer("Invalid session.")
         return
 
-    # Patiently check up to 3 seconds for Telegram to auto-forward the post to the group
     for _ in range(3):
         with db_lock:
             cur.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (cid,))
@@ -216,7 +213,6 @@ async def comment(m: types.Message, state: FSMContext):
     disc_chat_id, disc_msg_id = row[0], row[1]
 
     try:
-        # Send message to the discussion chat directly nested under the cloned post
         sent = await bot.send_message(
             chat_id=disc_chat_id,
             text=f"💬 **Anonymous:**\n\n{m.text}",

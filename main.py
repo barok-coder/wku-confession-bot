@@ -22,7 +22,7 @@ if not API_TOKEN:
     raise RuntimeError("API_TOKEN is missing in environment variables")
 
 CHANNEL_ID = "@wku_confessions_official"
-ADMIN_GROUP = -1003923693636
+ADMIN_GROUP = -1003923693636  # Review Group/Channel
 RENDER_URL = "https://wku-confession-bot-8aoc.onrender.com"
 
 WEBHOOK_PATH = "/webhook"
@@ -46,10 +46,12 @@ db_lock = threading.Lock()
 with db_lock:
     cur.execute("""
     CREATE TABLE IF NOT EXISTS confessions (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         text TEXT,
         photo TEXT,
-        channel_msg_id INTEGER
+        channel_msg_id INTEGER,
+        discussion_chat_id INTEGER,
+        discussion_msg_id INTEGER
     )
     """)
 
@@ -82,37 +84,50 @@ async def start(m: types.Message, state: FSMContext):
         cid = int(args[1].split("_")[1])
         await state.update_data(conf_id=cid)
         await state.set_state(S.wait_comment)
-        await m.answer("Send your comment:")
+        await m.answer(f"✍️ **You are replying anonymously to Confession #{cid}.**\nSend your comment below:")
         return
 
     await state.clear()
     await state.set_state(S.wait_conf)
-    await m.answer("Send confession anonymously.")
+    await m.answer("Welcome to WKU Confessions! 🤫\nSend your confession text or photo right here anonymously:")
 
-# ================= SAVE CONFESSION =================
+# ================= SAVE & FORWARD TO ADMINS =================
 
-@dp.message(S.wait_conf, F.text | F.photo)
+@dp.message(S.wait_conf, F.chat.type == "private", F.text | F.photo)
 async def save_conf(m: types.Message):
     text = m.text or m.caption
     photo = m.photo[-1].file_id if m.photo else None
 
     with db_lock:
         cur.execute(
-            "INSERT INTO confessions(text,photo,channel_msg_id) VALUES(?,?,?)",
+            "INSERT INTO confessions(text, photo, channel_msg_id) VALUES(?, ?, ?)",
             (text, photo, None)
         )
+        cid = cur.lastrowid
         db.commit()
 
-    await m.answer("Sent for review.")
+    # Build Admin Review Card
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Approve", callback_data=f"approve_{cid}")
+    kb.button(text="❌ Reject", callback_data=f"reject_{cid}")
+    
+    admin_text = f"🚨 **New Confession Submitted**\nID: #{cid}\n\n{text or '[Photo]'}"
 
-# ================= ADMIN APPROVE =================
+    if photo:
+        await bot.send_photo(ADMIN_GROUP, photo, caption=admin_text, reply_markup=kb.as_markup())
+    else:
+        await bot.send_message(ADMIN_GROUP, text=admin_text, reply_markup=kb.as_markup())
+
+    await m.answer("📥 Your anonymous confession has been submitted for admin review!")
+
+# ================= ADMIN APPROVE / REJECT =================
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(c: types.CallbackQuery):
     cid = int(c.data.split("_")[1])
 
     with db_lock:
-        cur.execute("SELECT text,photo FROM confessions WHERE id=?", (cid,))
+        cur.execute("SELECT text, photo FROM confessions WHERE id=?", (cid,))
         row = cur.fetchone()
 
     if not row:
@@ -120,31 +135,55 @@ async def approve(c: types.CallbackQuery):
         return
 
     text, photo = row
+    channel_post_text = f"📢 **WKU Confession #{cid}**\n\n{text or ''}"
 
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="💬 Comment",
-        url=f"https://t.me/{BOT_USERNAME}?start=comment_{cid}"
-    )
+    kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=comment_{cid}")
     kb.button(text="👍", callback_data=f"like_{cid}")
     kb.button(text="👎", callback_data=f"dislike_{cid}")
-    kb.adjust(1)
+    kb.adjust(1, 2)
 
     if photo:
-        msg = await bot.send_photo(CHANNEL_ID, photo, caption=text, reply_markup=kb.as_markup())
+        msg = await bot.send_photo(CHANNEL_ID, photo, caption=channel_post_text, reply_markup=kb.as_markup())
     else:
-        msg = await bot.send_message(CHANNEL_ID, text, reply_markup=kb.as_markup())
+        msg = await bot.send_message(CHANNEL_ID, channel_post_text, reply_markup=kb.as_markup())
 
     with db_lock:
-        cur.execute(
-            "UPDATE confessions SET channel_msg_id=? WHERE id=?",
-            (msg.message_id, cid)
-        )
+        cur.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (msg.message_id, cid))
         db.commit()
 
+    try:
+        await c.message.edit_caption(caption=f"✅ Approved!\nID: #{cid}") if c.message.photo else await c.message.edit_text(text=f"✅ Approved!\nID: #{cid}")
+    except Exception:
+        pass
     await c.answer("Approved")
 
-# ================= COMMENT SYSTEM =================
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(c: types.CallbackQuery):
+    try:
+        await c.message.delete()
+    except Exception:
+        pass
+    await c.answer("Rejected")
+
+# ================= AUTOMATIC FORWARD CAPTURE =================
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_discussion_forward(m: types.Message):
+    """Intercepts the automatically cloned channel post inside your discussion group"""
+    try:
+        if m.forward_from_chat and m.forward_from_chat.username == CHANNEL_ID.replace("@", ""):
+            orig_msg_id = m.forward_from_message_id
+            
+            with db_lock:
+                cur.execute("UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE channel_msg_id=?", 
+                            (m.chat.id, m.message_id, orig_msg_id))
+                db.commit()
+                logging.info(f"🎯 MATCHED: Channel Msg ID {orig_msg_id} mapped to Discussion Chat {m.chat.id} Msg ID {m.message_id}")
+    except Exception as e:
+        logging.error(f"Error mapping discussion forward: {e}")
+
+# ================= NATIVE COMMENT SYSTEM =================
 
 @dp.message(S.wait_comment, F.text)
 async def comment(m: types.Message, state: FSMContext):
@@ -155,31 +194,51 @@ async def comment(m: types.Message, state: FSMContext):
         await m.answer("Invalid session.")
         return
 
-    with db_lock:
-        cur.execute("SELECT channel_msg_id FROM confessions WHERE id=?", (cid,))
-        row = cur.fetchone()
+    # Patiently check up to 3 seconds for Telegram to auto-forward the post to the group
+    for _ in range(3):
+        with db_lock:
+            cur.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (cid,))
+            row = cur.fetchone()
+        if row and row[0] and row[1]:
+            break
+        await asyncio.sleep(1)
 
-    if not row:
-        await m.answer("Confession not found.")
+    if not row or not row[0] or not row[1]:
+        await m.answer("⚠️ System syncing! Please wait a moment for the post to register and try again.")
+        await state.clear()
         return
 
-    channel_msg_id = row[0]
+    disc_chat_id, disc_msg_id = row[0], row[1]
 
-    sent = await bot.send_message(
-        ADMIN_GROUP,
-        f"💬 {m.text}",
-        reply_to_message_id=channel_msg_id
-    )
+    try:
+        # Send message to the discussion chat directly nested under the cloned post
+        sent = await bot.send_message(
+            chat_id=disc_chat_id,
+            text=f"💬 **Anonymous:**\n\n{m.text}",
+            reply_to_message_id=disc_msg_id
+        )
 
-    with db_lock:
-        cur.execute("""
-        INSERT INTO comments(conf_id,parent_id,chat_id,msg_id,text)
-        VALUES(?,?,?,?,?)
-        """, (cid, None, ADMIN_GROUP, sent.message_id, m.text))
-        db.commit()
+        with db_lock:
+            cur.execute("""
+            INSERT INTO comments(conf_id, parent_id, chat_id, msg_id, text)
+            VALUES(?, ?, ?, ?, ?)
+            """, (cid, None, disc_chat_id, sent.message_id, m.text))
+            db.commit()
 
-    await m.answer("Comment posted.")
+        await m.answer("🚀 Your anonymous comment has been posted inside the replies drawer!")
+    except Exception as e:
+        logging.error(f"Error posting nested reply: {e}")
+        await m.answer("❌ Failed to post comment inside the channel's native feed.")
+        
     await state.clear()
+
+# ================= FALLBACK FOR MISSED PRIVATE MESSAGES =================
+
+@dp.message(F.chat.type == "private")
+async def private_fallback(m: types.Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(S.wait_conf)
+    await save_conf(m)
 
 # ================= FASTAPI =================
 
@@ -202,15 +261,14 @@ async def webhook(request: Request):
 async def startup():
     await bot.set_webhook(
         WEBHOOK_URL,
-        drop_pending_updates=True
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
     )
-    logging.info("Bot started")
+    logging.info("Bot started via Webhook")
 
 @app.on_event("shutdown")
 async def shutdown():
     await bot.session.close()
-
-# ================= RUN =================
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))

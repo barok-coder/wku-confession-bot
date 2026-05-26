@@ -86,6 +86,14 @@ def get_db():
 ANIMALS = ["Lion", "Fox", "Cheetah", "Owl", "Eagle", "Wolf", "Hawk", "Panther", "Leopard", "Shark"]
 ADJECTIVES = ["WKU_Senior", "Freshman", "Anonymous", "Hidden", "Shadow", "Silent", "Mysterious", "Clever"]
 
+def get_comment_count(conf_id: int) -> int:
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT COUNT(*) FROM comments WHERE conf_id=?", (conf_id,))
+    count = cursor.fetchone()[0]
+    db.close()
+    return count
+
 def get_or_create_identity(conf_id: int, user_id: int) -> str:
     db = get_db()
     cursor = db.cursor()
@@ -293,6 +301,30 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db.commit()
         db.close()
 
+        # Refresh the channel post button to show updated comment count
+        try:
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute("SELECT channel_msg_id, likes, dislikes FROM confessions WHERE id=?", (conf_id,))
+            crow = cursor.fetchone()
+            db.close()
+            if crow and crow[0]:
+                channel_msg_id, likes, dislikes = crow
+                comment_count = get_comment_count(conf_id)
+                kb_updated = InlineKeyboardBuilder()
+                kb_updated.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
+                kb_updated.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
+                kb_updated.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
+                kb_updated.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
+                kb_updated.adjust(2, 2)
+                await bot.edit_message_reply_markup(
+                    chat_id=CHANNEL_USERNAME,
+                    message_id=channel_msg_id,
+                    reply_markup=kb_updated.as_markup()
+                )
+        except Exception as e:
+            logging.warning(f"Could not refresh channel markup after comment: {e}")
+
         await message.answer("🚀 Your anonymous comment has been posted to the confession thread!")
         logging.info(f"✅ Comment posted: conf_id={conf_id} identity={identity}")
 
@@ -435,8 +467,9 @@ async def approve_confession(callback: types.CallbackQuery):
     db.close()
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-    kb.button(text="💬 See Comments", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{out.message_id}?comment=1")
+    comment_count = get_comment_count(conf_id)
+    kb.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
+    kb.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{out.message_id}?comment=1")
     kb.button(text="👍 0", callback_data=f"react:like:{conf_id}")
     kb.button(text="👎 0", callback_data=f"react:dislike:{conf_id}")
     kb.adjust(2, 2)
@@ -486,8 +519,9 @@ async def handle_reactions(callback: types.CallbackQuery):
     db.close()
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-    kb.button(text="💬 See Comments", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
+    comment_count = get_comment_count(conf_id)
+    kb.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
+    kb.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
     kb.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
     kb.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
     kb.adjust(2, 2)

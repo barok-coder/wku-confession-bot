@@ -147,7 +147,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     
     row = None
     for _ in range(4):
-        db = get_db()
+        db = get_get = get_db()
         cursor = db.cursor()
         cursor.execute("SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?", (conf_id,))
         row = cursor.fetchone()
@@ -301,3 +301,100 @@ async def approve_confession(callback: types.CallbackQuery):
         else:
             await callback.message.edit_text(text=f"✅ Approved!\nID: #{conf_id}")
     except Exception:
+        pass
+    await callback.answer("Broadcast complete.")
+
+@dp.callback_query(F.data.startswith("adm_reject:"))
+async def reject_confession(callback: types.CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer("Purged from pipeline queue.")
+
+@dp.callback_query(F.data.startswith("react:"))
+async def handle_reactions(callback: types.CallbackQuery):
+    _, r_type, conf_id = callback.data.split(":")
+    conf_id = int(conf_id)
+    
+    db = get_db()
+    cursor = db.cursor()
+    if r_type == "like":
+        cursor.execute("UPDATE confessions SET likes = likes + 1 WHERE id=?", (conf_id,))
+    else:
+        cursor.execute("UPDATE confessions SET dislikes = dislikes + 1 WHERE id=?", (conf_id,))
+    db.commit()
+    
+    cursor.execute("SELECT likes, dislikes, channel_msg_id FROM confessions WHERE id=?", (conf_id,))
+    likes, dislikes, channel_msg_id = cursor.fetchone()
+    db.close()
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Add Comment", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
+    kb.button(text="💬 See Comments", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
+    kb.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
+    kb.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
+    kb.adjust(2, 2)
+    
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
+        await callback.answer("Reaction updated!")
+    except Exception:
+        await callback.answer("Processing error.")
+
+# ================= 9. SYSTEM SYNC & THREADED DISCUSSIONS =================
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_discussion_mirror(message: types.Message):
+    try:
+        if message.forward_from_chat and message.forward_from_chat.username == CHANNEL_PUBLIC_NAME:
+            orig_msg_id = message.forward_from_message_id
+            
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute(
+                "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE channel_msg_id=?",
+                (message.chat.id, message.message_id, orig_msg_id)
+            )
+            db.commit()
+            db.close()
+            logging.info(f"🎯 SYSTEM SYNC: Linked Channel Post #{orig_msg_id} to Group Chat Thread {message.message_id}")
+    except Exception as e:
+        logging.error(f"Sync intercept error: {e}")
+
+# ================= 10. LIFESPAN MANAGEMENT SYSTEM =================
+token_string = os.getenv("API_TOKEN", "")
+STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global bot
+    token = os.getenv("API_TOKEN")
+    url = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
+    if not token:
+        raise RuntimeError("Missing API_TOKEN")
+    bot = Bot(token=token)
+    target_webhook_url = f"{url}/webhook/{token[:10]}"
+    await bot.set_webhook(url=target_webhook_url, drop_pending_updates=True, allowed_updates=["message", "callback_query"])
+    yield
+    if bot:
+        await bot.session.close()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post(STATIC_WEBHOOK_PATH)
+async def process_webhook_payload(request: Request):
+    if bot is not None:
+        try:
+            payload = await request.json()
+            update = types.Update.model_validate(payload, context={"bot": bot})
+            await dp.feed_update(bot, update)
+        except Exception:
+            pass
+    return {"ok": True}
+
+@app.get("/")
+def read_root():
+    return {"status": "operational", "engine": "aiogram3"}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), factory=False)

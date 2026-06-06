@@ -24,7 +24,28 @@ class BotStates(StatesGroup):
     writing_confession = State()
     writing_comment = State()
 
-CATEGORIES = ["General 📝", "Love ❤️", "Academic 🎓", "Campus Life 🏫", "Shoutout 🗣️", "Funny 😂"]
+# Categories mapped to match common topics
+CATEGORIES = [
+    "Relationship 👥",
+    "School & Exam 📚",
+    "Mental Health 🧠",
+    "General 📝",
+    "Funny 😂"
+]
+
+# Helper to format categories into hashtags similar to the screenshot
+def category_to_hashtags(category: str) -> str:
+    cat_lower = category.lower()
+    if "relationship" in cat_lower:
+        return "#Relationship #Sexual #Mental"
+    elif "school" in cat_lower or "exam" in cat_lower:
+        return "#School #Exam"
+    elif "mental" in cat_lower:
+        return "#Mental #Harassment"
+    elif "funny" in cat_lower:
+        return "#Funny #Humor"
+    else:
+        return "#General"
 
 # ================= 2. GLOBALS =================
 bot: Bot = None
@@ -113,19 +134,7 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
 
 # ================= 5. MANUAL SYNC HELPER =================
 async def try_manual_sync(conf_id: int, channel_msg_id: int) -> bool:
-    """
-    Fallback: Ask Telegram directly for the discussion thread
-    by forwarding a pin/unpin or using getDiscussion if available.
-    Instead, we use a simpler approach: bot tries to get the message
-    from the channel and find the linked discussion message_id via
-    the Telegram Bot API getForumTopicIconStickers workaround.
-    
-    Simplest reliable fallback: store channel_msg_id and let the bot
-    post directly using reply_to_message_id on the channel post itself
-    if discussion is linked — Telegram routes it automatically.
-    """
     try:
-        # Try to get the linked discussion group from the channel
         chat = await bot.get_chat(CHANNEL_USERNAME)
         linked_chat_id = getattr(chat, 'linked_chat_id', None)
         
@@ -133,40 +142,9 @@ async def try_manual_sync(conf_id: int, channel_msg_id: int) -> bool:
             logging.warning("Channel has no linked discussion group set.")
             return False
 
-        # Use forwardMessage to find the mirrored message in discussion
-        # Telegram auto-mirrors channel posts to discussion with same content
-        # We search recent messages by trying message IDs around channel_msg_id
-        # The discussion msg_id is usually very close to channel_msg_id
-        
-        # Store the linked_chat_id so we can post directly
         db = get_db()
         cursor = db.cursor()
         
-        # Try to find the discussion message by fetching it
-        # Discussion group mirrors posts: try IDs in a window
-        found_msg_id = None
-        for offset in range(0, 20):
-            try:
-                test_msg_id = channel_msg_id + offset
-                msg = await bot.forward_message(
-                    chat_id=linked_chat_id,
-                    from_chat_id=CHANNEL_USERNAME,
-                    message_id=channel_msg_id,
-                    disable_notification=True
-                )
-                # If forward succeeded, get the actual thread root
-                # Delete the test forward immediately
-                await bot.delete_message(chat_id=linked_chat_id, message_id=msg.message_id)
-                
-                # The real mirror msg_id is msg.message_id - 1 typically
-                # but we can't be sure. Use a different approach below.
-                break
-            except Exception:
-                break
-
-        # Best reliable approach: just store linked_chat_id + channel_msg_id
-        # and use reply_to_message_id=channel_msg_id when posting to linked group
-        # Telegram will thread it correctly
         cursor.execute(
             "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE id=?",
             (linked_chat_id, channel_msg_id, conf_id)
@@ -211,7 +189,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     kb.adjust(2)
     await state.set_state(BotStates.choosing_category)
     await message.answer(
-        "Welcome to **WKU Confessions**! 🤫\nChoose a category for your submission:",
+        "Welcome to the Confessions Bot! 🤫\nChoose a category for your submission:",
         reply_markup=kb.as_markup()
     )
 
@@ -237,7 +215,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Step 1: Check DB for sync data
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -251,7 +228,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     disc_msg_id  = row[1] if row else None
     channel_msg_id = row[2] if row else None
 
-    # Step 2: If not synced, try manual sync using linked_chat_id
     if not disc_chat_id or not disc_msg_id:
         logging.info(f"Sync missing for conf_id={conf_id}, attempting manual sync...")
         if channel_msg_id:
@@ -269,14 +245,12 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
                     disc_chat_id = row2[0]
                     disc_msg_id  = row2[1]
 
-    # Step 3: Still no sync — tell user clearly
     if not disc_chat_id or not disc_msg_id:
         await message.answer(
             "⚠️ Could not link to the confession thread.\n\n"
             "**Possible reasons:**\n"
             "• The bot is not an admin in the linked discussion group\n"
-            "• The channel has no linked discussion group\n\n"
-            "Ask the admin to check bot permissions and try again."
+            "• The channel has no linked discussion group"
         )
         await state.clear()
         return
@@ -301,7 +275,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db.commit()
         db.close()
 
-        # Refresh the channel post button to show updated comment count
+        # Update post inline keyboard with the updated layout
         try:
             db = get_db()
             cursor = db.cursor()
@@ -311,12 +285,16 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             if crow and crow[0]:
                 channel_msg_id, likes, dislikes = crow
                 comment_count = get_comment_count(conf_id)
+                
                 kb_updated = InlineKeyboardBuilder()
-                kb_updated.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-                kb_updated.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
-                kb_updated.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
-                kb_updated.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
-                kb_updated.adjust(2, 2)
+                kb_updated.button(
+                    text=f"💬 View / Add Comments ({comment_count})", 
+                    url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
+                )
+                kb_updated.button(text=f"❤️ {likes}", callback_data=f"react:like:{conf_id}")
+                kb_updated.button(text=f"😭 {dislikes}", callback_data=f"react:dislike:{conf_id}")
+                kb_updated.adjust(1, 2)
+                
                 await bot.edit_message_reply_markup(
                     chat_id=CHANNEL_USERNAME,
                     message_id=channel_msg_id,
@@ -325,7 +303,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         except Exception as e:
             logging.warning(f"Could not refresh channel markup after comment: {e}")
 
-        await message.answer("🚀 Your anonymous comment has been posted to the confession thread!")
+        await message.answer("🚀 Your anonymous comment has been posted!")
         logging.info(f"✅ Comment posted: conf_id={conf_id} identity={identity}")
 
     except Exception as e:
@@ -393,7 +371,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! Pending admin review.")
     await state.clear()
 
-# ================= 9. FALLBACK (must be last private handler) =================
+# ================= 9. FALLBACK =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -428,7 +406,10 @@ async def approve_confession(callback: types.CallbackQuery):
         return
 
     text, file_id, file_type, category = row
-    public_text = f"📢 **WKU Confession #{conf_id}**\n🏷️ Category: {category}\n\n{text}"
+    hashtags = category_to_hashtags(category)
+    
+    # Matches clean screenshot structure
+    public_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
     kb_placeholder = InlineKeyboardBuilder()
     kb_placeholder.button(text="⏳ Loading...", callback_data="placeholder_sync")
@@ -443,18 +424,11 @@ async def approve_confession(callback: types.CallbackQuery):
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
-    # ── INSTANT SYNC: fetch linked_chat_id right now and store it ──
     try:
         chat = await bot.get_chat(CHANNEL_USERNAME)
         linked_chat_id = getattr(chat, 'linked_chat_id', None)
         if linked_chat_id:
-            # Give Telegram 2s to mirror the post to the discussion group
             await asyncio.sleep(2)
-            # The mirrored message_id in the discussion group is fetched by
-            # forwarding from channel — but we can't get it directly.
-            # Store linked_chat_id + channel msg_id as discussion reference.
-            # Telegram threads replies to channel_msg_id correctly when
-            # reply_to_message_id matches the auto-forwarded copy.
             cursor.execute(
                 "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE id=?",
                 (linked_chat_id, out.message_id, conf_id)
@@ -466,13 +440,16 @@ async def approve_confession(callback: types.CallbackQuery):
 
     db.close()
 
+    # Re-build post button styling to match the screenshot interface
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)
-    kb.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-    kb.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{out.message_id}?comment=1")
-    kb.button(text="👍 0", callback_data=f"react:like:{conf_id}")
-    kb.button(text="👎 0", callback_data=f"react:dislike:{conf_id}")
-    kb.adjust(2, 2)
+    kb.button(
+        text=f"💬 View / Add Comments ({comment_count})", 
+        url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
+    )
+    kb.button(text="❤️ 0", callback_data=f"react:like:{conf_id}")
+    kb.button(text="😭 0", callback_data=f"react:dislike:{conf_id}")
+    kb.adjust(1, 2)
 
     try:
         await bot.edit_message_reply_markup(
@@ -520,11 +497,13 @@ async def handle_reactions(callback: types.CallbackQuery):
 
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)
-    kb.button(text=f"💬 Comment ({comment_count})", url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}")
-    kb.button(text="👀 See Thread", url=f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1")
-    kb.button(text=f"👍 {likes}", callback_data=f"react:like:{conf_id}")
-    kb.button(text=f"👎 {dislikes}", callback_data=f"react:dislike:{conf_id}")
-    kb.adjust(2, 2)
+    kb.button(
+        text=f"💬 View / Add Comments ({comment_count})", 
+        url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
+    )
+    kb.button(text=f"❤️ {likes}", callback_data=f"react:like:{conf_id}")
+    kb.button(text=f"😭 {dislikes}", callback_data=f"react:dislike:{conf_id}")
+    kb.adjust(1, 2)
 
     try:
         await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
@@ -538,14 +517,12 @@ async def catch_discussion_mirror(message: types.Message):
     try:
         orig_msg_id = None
 
-        # Method 1: Legacy forward_from_chat
         if message.forward_from_chat:
             fc = message.forward_from_chat
             if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
                 orig_msg_id = message.forward_from_message_id
                 logging.info(f"🔎 Sync M1: orig={orig_msg_id}")
 
-        # Method 2: Bot API 7.0+ forward_origin
         if not orig_msg_id and message.forward_origin:
             fo = message.forward_origin
             if hasattr(fo, "chat") and hasattr(fo, "message_id"):

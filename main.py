@@ -51,7 +51,8 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-CHANNEL_PUBLIC_NAME = "wku_confessions_official"
+# Updated channel name based on your configuration
+CHANNEL_PUBLIC_NAME = "wku_conffesions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionsbot"
 
@@ -137,7 +138,6 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
 
-    # Handles deep links like https://t.me/wku_confessionsbot?start=reply_691
     if len(args) > 1 and args[1].startswith("reply_"):
         try:
             conf_id = int(args[1].split("_")[1])
@@ -160,7 +160,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
             hashtags = category_to_hashtags(category)
             comment_count = get_comment_count(conf_id)
 
-            # Styled card structure matching input_file_1.png
             card_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
             kb = InlineKeyboardBuilder()
@@ -292,8 +291,10 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         try:
             comment_count = get_comment_count(conf_id)
             kb_updated = InlineKeyboardBuilder()
+            
+            # Adjusted comment button label to "Confess"
             kb_updated.button(
-                text=f"💬 View / Add Comments ({comment_count})", 
+                text=f"💬 Confess ({comment_count})", 
                 url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
             )
             kb_updated.adjust(1)
@@ -424,6 +425,17 @@ async def approve_confession(callback: types.CallbackQuery):
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
+    # Automatically pin approved post in the channel to create the header/quick-action bar
+    try:
+        await bot.pin_chat_message(
+            chat_id=CHANNEL_USERNAME,
+            message_id=out.message_id,
+            disable_notification=True
+        )
+        logging.info(f"📌 Pinned approved confession #{conf_id} in channel.")
+    except Exception as e:
+        logging.error(f"Failed to automatically pin post in channel: {e}")
+
     try:
         chat = await bot.get_chat(CHANNEL_USERNAME)
         linked_chat_id = getattr(chat, 'linked_chat_id', None)
@@ -433,4 +445,71 @@ async def approve_confession(callback: types.CallbackQuery):
                 (linked_chat_id, conf_id)
             )
             db.commit()
-            logging.info(f"✅ Sync successful: conf_i
+            logging.info(f"✅ Sync successful: conf_id={conf_id} linked with discussion={linked_chat_id}")
+    except Exception as e:
+        logging.error(f"Sync failed during approval: {e}")
+
+    db.close()
+
+    # Set up button action, updated label to "Confess"
+    kb = InlineKeyboardBuilder()
+    comment_count = get_comment_count(conf_id)
+    kb.button(
+        text=f"💬 Confess ({comment_count})", 
+        url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
+    )
+    kb.adjust(1)
+
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=CHANNEL_USERNAME,
+            message_id=out.message_id,
+            reply_markup=kb.as_markup()
+        )
+    except Exception as e:
+        logging.error(f"Markup update error: {e}")
+
+    try:
+        if callback.message.photo or callback.message.video:
+            await callback.message.edit_caption(caption=f"✅ Approved! ID: #{conf_id}")
+        else:
+            await callback.message.edit_text(text=f"✅ Approved! ID: #{conf_id}")
+    except Exception:
+        pass
+
+    await callback.answer("Published!")
+
+@dp.callback_query(F.data.startswith("adm_reject:"))
+async def reject_confession(callback: types.CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer("Rejected.")
+
+# Silent legacy handler
+@dp.callback_query(F.data.startswith("react:"))
+async def handle_reactions(callback: types.CallbackQuery):
+    await callback.answer("Reactions are deactivated.")
+
+# ================= 10. DISCUSSION GROUP SYNC =================
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_discussion_mirror(message: types.Message):
+    try:
+        orig_msg_id = None
+
+        if message.forward_from_chat:
+            fc = message.forward_from_chat
+            if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
+                orig_msg_id = message.forward_from_message_id
+
+        if not orig_msg_id and message.forward_origin:
+            fo = message.forward_origin
+            if hasattr(fo, "chat") and hasattr(fo, "message_id"):
+                uname = getattr(fo.chat, "username", "") or ""
+                if uname.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
+                    orig_msg_id = fo.message_id
+
+        if orig_msg_id:
+            db = get_db()
+            cursor =

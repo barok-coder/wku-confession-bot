@@ -52,7 +52,7 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Configured precisely to match your exact channels and bot usernames
+# Configured precisely to match your exact channel and bot usernames
 CHANNEL_PUBLIC_NAME = "wku_confessions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionsbot"
@@ -106,7 +106,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             conf_id INTEGER,
             chat_id INTEGER,
-            msg_id INTEGER
+            msg_id INTEGER,
+            text TEXT
         )
         """)
         cursor.execute("""
@@ -116,6 +117,14 @@ def init_db():
         )
         """)
         conn.commit()
+        
+        # Safe schema migration: adds text column to comments table if missing
+        try:
+            cursor.execute("ALTER TABLE comments ADD COLUMN text TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+            
         conn.close()
 
 init_db()
@@ -196,8 +205,8 @@ async def send_confession_card(event, conf_id: int):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Add Comment", callback_data=f"add_comment:{conf_id}")
-    comments_url = f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1"
-    kb.button(text=f"💬 Browse Comments ({comment_count})", url=comments_url)
+    # Display comments natively inside the bot private chat instead of linking to external URL
+    kb.button(text=f"💬 Browse Comments ({comment_count})", callback_data=f"browse_comments:{conf_id}")
     kb.adjust(1)
 
     target = event if isinstance(event, types.Message) else event.message
@@ -394,11 +403,12 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         return
 
     identity = get_or_create_identity(conf_id, message.from_user.id)
+    comment_text_formatted = f"💬 **{identity}**:\n\n{message.text}"
 
     try:
         sent = await bot.send_message(
             chat_id=disc_chat_id,
-            text=f"💬 **{identity}**:\n\n{message.text}",
+            text=comment_text_formatted,
             reply_parameters=ReplyParameters(
                 message_id=channel_msg_id,
                 chat_id=CHANNEL_TARGET
@@ -408,8 +418,8 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db = get_db()
         cursor = db.cursor()
         cursor.execute(
-            "INSERT INTO comments (conf_id, chat_id, msg_id) VALUES (?, ?, ?)",
-            (conf_id, disc_chat_id, sent.message_id)
+            "INSERT INTO comments (conf_id, chat_id, msg_id, text) VALUES (?, ?, ?, ?)",
+            (conf_id, disc_chat_id, sent.message_id, comment_text_formatted)
         )
         db.commit()
         db.close()
@@ -442,6 +452,48 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         )
 
     await state.clear()
+
+# Native Comments Browser Inside Bot Chat
+@dp.callback_query(F.data.startswith("browse_comments:"))
+async def browse_comments_callback(callback: types.CallbackQuery):
+    conf_id = int(callback.data.split(":")[1])
+    
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT text FROM comments WHERE conf_id=? ORDER BY id ASC", (conf_id,))
+    rows = cursor.fetchall()
+    db.close()
+    
+    if not rows:
+        await callback.answer("💬 No comments on this confession yet!", show_alert=True)
+        return
+    
+    comments_text = f"💬 **Comments for Confession #{conf_id}**\n\n"
+    for i, row in enumerate(rows, 1):
+        comments_text += f"{i}. {row[0]}\n"
+        comments_text += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Back to Confession", callback_data=f"back_to_card:{conf_id}")
+    kb.adjust(1)
+    
+    try:
+        await callback.message.delete()
+        await callback.message.answer(comments_text, reply_markup=kb.as_markup())
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error showing comments: {e}")
+        await callback.answer("Error displaying comments.")
+
+@dp.callback_query(F.data.startswith("back_to_card:"))
+async def back_to_card_callback(callback: types.CallbackQuery):
+    conf_id = int(callback.data.split(":")[1])
+    try:
+        await callback.message.delete()
+        await send_confession_card(callback, conf_id)
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Error returning to confession card: {e}")
 
 # ================= 8. CONFESSION SUBMISSION =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
@@ -556,16 +608,7 @@ async def approve_confession(callback: types.CallbackQuery):
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
-    # Automatically pin approved post inside your channel dynamically using out.chat.id
-    try:
-        await bot.pin_chat_message(
-            chat_id=out.chat.id,
-            message_id=out.message_id,
-            disable_notification=True
-        )
-        logging.info(f"📌 Pinned approved confession #{conf_id} in channel.")
-    except Exception as e:
-        logging.error(f"Failed to automatically pin post in channel: {e}")
+    # Confession auto-pinning has been fully deactivated per your requirements
 
     try:
         chat = await bot.get_chat(CHANNEL_TARGET)

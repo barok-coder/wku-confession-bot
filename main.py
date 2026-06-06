@@ -51,8 +51,8 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Updated channel name based on your configuration
-CHANNEL_PUBLIC_NAME = "wku_conffesions_official"
+# Default to "wku_confession" based on your screenshot
+CHANNEL_PUBLIC_NAME = "wku_confession"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionsbot"
 
@@ -430,10 +430,10 @@ async def approve_confession(callback: types.CallbackQuery):
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
-    # Automatically pin approved post in the channel to create the header/quick-action bar
+    # Automatically pin approved post in the channel using its direct numeric chat ID
     try:
         await bot.pin_chat_message(
-            chat_id=CHANNEL_USERNAME,
+            chat_id=out.chat.id,
             message_id=out.message_id,
             disable_notification=True
         )

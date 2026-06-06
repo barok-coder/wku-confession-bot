@@ -237,7 +237,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         kb.adjust(1)
         
         await message.answer(
-            "Welcome to the Confessions Bot! 🤫\n\n"
+            "Welcome to the Confessions Bot! \n\n"
             "Before using the bot, please accept our community rules:\n"
             "1. Be respectful to other members.\n"
             "2. No hate speech, racism, or targetted harassment.\n"
@@ -297,7 +297,7 @@ async def back_to_menu_flow(callback: types.CallbackQuery):
     kb.button(text="📜 View Rules", callback_data="view_rules")
     kb.adjust(1)
     await callback.message.edit_text(
-        "🎉 You can use the buttons below to navigate the bot:",
+        "You can use the buttons below to navigate the bot:",
         reply_markup=kb.as_markup()
     )
     await callback.answer()
@@ -507,9 +507,9 @@ async def cmd_setup_channel(message: types.Message):
         sent = await bot.send_message(
             chat_id=CHANNEL_TARGET,
             text=(
-                "📢 **WKU Confessions** 🤫\n\n"
+                "WKU Confessions\n\n"
                 "Share your thoughts, secrets, and stories completely anonymously!\n\n"
-                "👇 Click the button below to submit a confession, read rules, or browse comments!"
+                "Click the button below to submit a confession, read rules, or browse comments!"
             ),
             reply_markup=kb.as_markup()
         )
@@ -565,7 +565,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     kb.button(text="❌ Reject", callback_data=f"adm_reject:{conf_id}")
     kb.adjust(2)
 
-    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{text}"
+    admin_caption = f"Category: **{category}**\nQueue ID: `#{conf_id}`\n\nConfession:\n{text}"
 
     try:
         if file_type == "photo":

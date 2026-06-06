@@ -495,7 +495,42 @@ async def back_to_card_callback(callback: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Error returning to confession card: {e}")
 
-# ================= 8. CONFESSION SUBMISSION =================
+# ================= 8. EXPLICIT PIN SETUP COMMAND =================
+@dp.message(Command("setup_channel"), F.chat.type == "private")
+async def cmd_setup_channel(message: types.Message):
+    kb = InlineKeyboardBuilder()
+    # Correctly links directly to @wku_confessionsbot to allow new confessions submission
+    kb.button(text="💬 Confess!", url=f"https://t.me/{BOT_USERNAME}")
+    kb.adjust(1)
+    
+    try:
+        sent = await bot.send_message(
+            chat_id=CHANNEL_TARGET,
+            text=(
+                "📢 **WKU Confessions** 🤫\n\n"
+                "Share your thoughts, secrets, and stories completely anonymously!\n\n"
+                "👇 Click the button below to submit a confession, read rules, or browse comments!"
+            ),
+            reply_markup=kb.as_markup()
+        )
+        
+        # Pins the permanent welcome message inside the channel
+        await bot.pin_chat_message(
+            chat_id=sent.chat.id,
+            message_id=sent.message_id,
+            disable_notification=False
+        )
+        
+        await message.answer("✅ Successfully posted and pinned the permanent 'Confess' message in your channel!")
+    except Exception as e:
+        logging.error(f"Failed to setup channel pinned message: {e}")
+        await message.answer(
+            f"❌ Failed to setup channel.\n\n"
+            f"**Error**: {e}\n\n"
+            f"Make sure the bot is an Administrator inside {CHANNEL_USERNAME} with both 'Post Messages' and 'Pin Messages' permissions enabled."
+        )
+
+# ================= 9. CONFESSION SUBMISSION =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -546,7 +581,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! Pending admin review.")
     await state.clear()
 
-# ================= 9. FALLBACK =================
+# ================= 10. FALLBACK =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -565,7 +600,7 @@ async def fallback_private(message: types.Message, state: FSMContext):
         reply_markup=kb.as_markup()
     )
 
-# ================= 10. MODERATION =================
+# ================= 11. MODERATION =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -648,7 +683,7 @@ async def reject_confession(callback: types.CallbackQuery):
 async def handle_reactions(callback: types.CallbackQuery):
     await callback.answer("Reactions are deactivated.")
 
-# ================= 11. DISCUSSION GROUP SYNC =================
+# ================= 12. DISCUSSION GROUP SYNC =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
@@ -679,7 +714,7 @@ async def catch_discussion_mirror(message: types.Message):
     except Exception as e:
         logging.error(f"Sync error: {e}")
 
-# ================= 12. LIFESPAN =================
+# ================= 13. LIFESPAN =================
 token_string = os.getenv("API_TOKEN", "")
 STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
 

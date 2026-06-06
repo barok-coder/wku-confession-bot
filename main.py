@@ -47,14 +47,20 @@ def category_to_hashtags(category: str) -> str:
     else:
         return "#General"
 
-# ================= 2. GLOBALS =================
+# ================= 2. GLOBALS & CONFIGURATION =================
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Configuration aligned with your exact channel and bot usernames
+# Dynamic destination target for the channel (Supports username or numeric ID for private channels)
+CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", "@wku_confession")
+try:
+    CHANNEL_TARGET = int(CHANNEL_ID_ENV)
+except ValueError:
+    CHANNEL_TARGET = CHANNEL_ID_ENV
+
 CHANNEL_PUBLIC_NAME = "wku_confession"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
-BOT_USERNAME = "wku_confessionbot"  # Updated to singular as requested
+BOT_USERNAME = "wku_confessionbot"
 
 # ================= 3. DATABASE =================
 DB_FILE = "confessions.db"
@@ -243,7 +249,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
 
     if not disc_chat_id:
         try:
-            chat = await bot.get_chat(CHANNEL_USERNAME)
+            chat = await bot.get_chat(CHANNEL_TARGET)
             disc_chat_id = getattr(chat, 'linked_chat_id', None)
             if disc_chat_id:
                 db = get_db()
@@ -261,7 +267,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await message.answer(
             "⚠️ Could not link your comment to the channel thread.\n\n"
             "Required setup steps:\n"
-            "1. Link a Discussion Group to your channel (Channel Settings -> Discussion -> Link Group).\n"
+            "1. Link a Discussion Group to your channel.\n"
             "2. Add this bot as an Admin in that Discussion Group."
         )
         await state.clear()
@@ -275,7 +281,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             text=f"💬 {identity}:\n\n{message.text}",
             reply_parameters=ReplyParameters(
                 message_id=channel_msg_id,
-                chat_id=CHANNEL_USERNAME
+                chat_id=CHANNEL_TARGET
             )
         )
 
@@ -298,7 +304,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             )
             kb_updated.adjust(1)
             await bot.edit_message_reply_markup(
-                chat_id=CHANNEL_USERNAME,
+                chat_id=CHANNEL_TARGET,
                 message_id=channel_msg_id,
                 reply_markup=kb_updated.as_markup()
             )
@@ -420,17 +426,23 @@ async def approve_confession(callback: types.CallbackQuery):
     )
     kb.adjust(1)
 
-    if file_type == "photo":
-        out = await bot.send_photo(CHANNEL_USERNAME, file_id, caption=public_text, reply_markup=kb.as_markup())
-    elif file_type == "video":
-        out = await bot.send_video(CHANNEL_USERNAME, file_id, caption=public_text, reply_markup=kb.as_markup())
-    else:
-        out = await bot.send_message(CHANNEL_USERNAME, text=public_text, reply_markup=kb.as_markup())
+    try:
+        if file_type == "photo":
+            out = await bot.send_photo(chat_id=CHANNEL_TARGET, photo=file_id, caption=public_text, reply_markup=kb.as_markup())
+        elif file_type == "video":
+            out = await bot.send_video(chat_id=CHANNEL_TARGET, video=file_id, caption=public_text, reply_markup=kb.as_markup())
+        else:
+            out = await bot.send_message(chat_id=CHANNEL_TARGET, text=public_text, reply_markup=kb.as_markup())
+    except Exception as e:
+        logging.error(f"❌ FAILED TO SEND TO CHANNEL {CHANNEL_TARGET}: {e}")
+        await callback.answer(f"❌ Error: Could not send to channel. Make sure bot is an admin inside {CHANNEL_TARGET}.", show_alert=True)
+        db.close()
+        return
 
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
-    # Automatically pin approved post in the channel using its direct numeric chat ID
+    # Automatically pin approved post in the channel dynamically using out.chat.id
     try:
         await bot.pin_chat_message(
             chat_id=out.chat.id,
@@ -442,7 +454,7 @@ async def approve_confession(callback: types.CallbackQuery):
         logging.error(f"Failed to automatically pin post in channel: {e}")
 
     try:
-        chat = await bot.get_chat(CHANNEL_USERNAME)
+        chat = await bot.get_chat(CHANNEL_TARGET)
         linked_chat_id = getattr(chat, 'linked_chat_id', None)
         if linked_chat_id:
             cursor.execute(

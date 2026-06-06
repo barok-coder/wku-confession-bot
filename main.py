@@ -51,8 +51,8 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Adjusted to match your exact live channel username "wku_confession"
-CHANNEL_PUBLIC_NAME = "wku_confession"
+# Adjusted to target your exact main channel: @wku_confessions_official
+CHANNEL_PUBLIC_NAME = "wku_confessions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
 BOT_USERNAME = "wku_confessionbot"
 
@@ -419,7 +419,6 @@ async def approve_confession(callback: types.CallbackQuery):
     hashtags = category_to_hashtags(category)
     public_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
-    # Build the action button
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)
     kb.button(
@@ -437,7 +436,7 @@ async def approve_confession(callback: types.CallbackQuery):
             out = await bot.send_message(chat_id=CHANNEL_TARGET, text=public_text, reply_markup=kb.as_markup())
     except Exception as e:
         logging.error(f"❌ FAILED TO SEND TO CHANNEL {CHANNEL_TARGET}: {e}")
-        await callback.answer(f"❌ Error: Could not send to channel. Make sure the bot is added as an Administrator inside {CHANNEL_TARGET}.", show_alert=True)
+        await callback.answer(f"❌ Error: Could not send to channel. Make sure the bot is added as an Administrator inside {CHANNEL_USERNAME}.", show_alert=True)
         db.close()
         return
 

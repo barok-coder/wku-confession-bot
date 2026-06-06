@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import ReplyParameters
 
 from fastapi import FastAPI, Request
 import uvicorn
@@ -24,7 +25,7 @@ class BotStates(StatesGroup):
     writing_confession = State()
     writing_comment = State()
 
-# Categories mapped to match common topics
+# Categories mapped to match the screenshot tags
 CATEGORIES = [
     "Relationship 👥",
     "School & Exam 📚",
@@ -33,7 +34,6 @@ CATEGORIES = [
     "Funny 😂"
 ]
 
-# Helper to format categories into hashtags similar to the screenshot
 def category_to_hashtags(category: str) -> str:
     cat_lower = category.lower()
     if "relationship" in cat_lower:
@@ -132,35 +132,7 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
     db.close()
     return name
 
-# ================= 5. MANUAL SYNC HELPER =================
-async def try_manual_sync(conf_id: int, channel_msg_id: int) -> bool:
-    try:
-        chat = await bot.get_chat(CHANNEL_USERNAME)
-        linked_chat_id = getattr(chat, 'linked_chat_id', None)
-        
-        if not linked_chat_id:
-            logging.warning("Channel has no linked discussion group set.")
-            return False
-
-        db = get_db()
-        cursor = db.cursor()
-        
-        cursor.execute(
-            "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE id=?",
-            (linked_chat_id, channel_msg_id, conf_id)
-        )
-        rows = cursor.rowcount
-        db.commit()
-        db.close()
-        
-        logging.info(f"✅ Manual sync: conf_id={conf_id} linked to chat={linked_chat_id} msg={channel_msg_id} (rows={rows})")
-        return rows > 0
-
-    except Exception as e:
-        logging.error(f"Manual sync error: {e}")
-        return False
-
-# ================= 6. START / CATEGORY =================
+# ================= 5. START / CATEGORY =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
@@ -204,7 +176,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ================= 7. COMMENT HANDLER =================
+# ================= 6. COMMENT HANDLER =================
 @dp.message(BotStates.writing_comment, F.chat.type == "private")
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
@@ -215,42 +187,43 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    # Step 1: Read information from DB
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
-        "SELECT discussion_chat_id, discussion_msg_id, channel_msg_id FROM confessions WHERE id=?",
+        "SELECT discussion_chat_id, channel_msg_id FROM confessions WHERE id=?",
         (conf_id,)
     )
     row = cursor.fetchone()
     db.close()
 
     disc_chat_id = row[0] if row else None
-    disc_msg_id  = row[1] if row else None
-    channel_msg_id = row[2] if row else None
+    channel_msg_id = row[1] if row else None
 
-    if not disc_chat_id or not disc_msg_id:
-        logging.info(f"Sync missing for conf_id={conf_id}, attempting manual sync...")
-        if channel_msg_id:
-            synced = await try_manual_sync(conf_id, channel_msg_id)
-            if synced:
+    # Step 2: Try to retrieve discussion chat dynamically if not recorded yet
+    if not disc_chat_id:
+        try:
+            chat = await bot.get_chat(CHANNEL_USERNAME)
+            disc_chat_id = getattr(chat, 'linked_chat_id', None)
+            if disc_chat_id:
                 db = get_db()
                 cursor = db.cursor()
                 cursor.execute(
-                    "SELECT discussion_chat_id, discussion_msg_id FROM confessions WHERE id=?",
-                    (conf_id,)
+                    "UPDATE confessions SET discussion_chat_id=? WHERE id=?",
+                    (disc_chat_id, conf_id)
                 )
-                row2 = cursor.fetchone()
+                db.commit()
                 db.close()
-                if row2 and row2[0]:
-                    disc_chat_id = row2[0]
-                    disc_msg_id  = row2[1]
+        except Exception as e:
+            logging.error(f"Failed to auto-retrieve linked chat: {e}")
 
-    if not disc_chat_id or not disc_msg_id:
+    # Step 3: Still no target group chat — warn the user
+    if not disc_chat_id or not channel_msg_id:
         await message.answer(
-            "⚠️ Could not link to the confession thread.\n\n"
-            "**Possible reasons:**\n"
-            "• The bot is not an admin in the linked discussion group\n"
-            "• The channel has no linked discussion group"
+            "⚠️ Could not link your comment to the channel thread.\n\n"
+            "**Required setup steps:**\n"
+            "1. Link a **Discussion Group** to your channel (Channel Settings -> Discussion -> Link Group).\n"
+            "2. Add this bot as an **Admin** in that Discussion Group."
         )
         await state.clear()
         return
@@ -258,12 +231,14 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     identity = get_or_create_identity(conf_id, message.from_user.id)
 
     try:
-        parent_reply_id = state_data.get("parent_reply_msg_id") or disc_msg_id
-
+        # Send message to the discussion group, linking directly to the channel message
         sent = await bot.send_message(
             chat_id=disc_chat_id,
             text=f"💬 **{identity}**:\n\n{message.text}",
-            reply_to_message_id=parent_reply_id
+            reply_parameters=ReplyParameters(
+                message_id=channel_msg_id,
+                chat_id=CHANNEL_USERNAME
+            )
         )
 
         db = get_db()
@@ -275,47 +250,36 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db.commit()
         db.close()
 
-        # Update post inline keyboard with the updated layout
+        # Update post comments count (No reaction buttons)
         try:
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute("SELECT channel_msg_id, likes, dislikes FROM confessions WHERE id=?", (conf_id,))
-            crow = cursor.fetchone()
-            db.close()
-            if crow and crow[0]:
-                channel_msg_id, likes, dislikes = crow
-                comment_count = get_comment_count(conf_id)
-                
-                kb_updated = InlineKeyboardBuilder()
-                kb_updated.button(
-                    text=f"💬 View / Add Comments ({comment_count})", 
-                    url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
-                )
-                kb_updated.button(text=f"❤️ {likes}", callback_data=f"react:like:{conf_id}")
-                kb_updated.button(text=f"😭 {dislikes}", callback_data=f"react:dislike:{conf_id}")
-                kb_updated.adjust(1, 2)
-                
-                await bot.edit_message_reply_markup(
-                    chat_id=CHANNEL_USERNAME,
-                    message_id=channel_msg_id,
-                    reply_markup=kb_updated.as_markup()
-                )
+            comment_count = get_comment_count(conf_id)
+            kb_updated = InlineKeyboardBuilder()
+            kb_updated.button(
+                text=f"💬 View / Add Comments ({comment_count})", 
+                url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
+            )
+            kb_updated.adjust(1)
+            await bot.edit_message_reply_markup(
+                chat_id=CHANNEL_USERNAME,
+                message_id=channel_msg_id,
+                reply_markup=kb_updated.as_markup()
+            )
         except Exception as e:
-            logging.warning(f"Could not refresh channel markup after comment: {e}")
+            logging.warning(f"Could not refresh channel post comments markup: {e}")
 
-        await message.answer("🚀 Your anonymous comment has been posted!")
+        await message.answer("🚀 Your anonymous comment has been posted to the confession thread!")
         logging.info(f"✅ Comment posted: conf_id={conf_id} identity={identity}")
 
     except Exception as e:
-        logging.error(f"Comment post error: {e}")
+        logging.error(f"Comment submission failed: {e}")
         await message.answer(
-            "❌ Failed to post your comment.\n"
-            "Make sure the bot is an admin in the discussion group."
+            "❌ Failed to submit comment.\n"
+            "Please make sure the bot is an Admin with post/send privileges in your channel's Discussion Group."
         )
 
     await state.clear()
 
-# ================= 8. CONFESSION SUBMISSION =================
+# ================= 7. CONFESSION SUBMISSION =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -371,7 +335,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! Pending admin review.")
     await state.clear()
 
-# ================= 9. FALLBACK =================
+# ================= 8. FALLBACK =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -390,7 +354,7 @@ async def fallback_private(message: types.Message, state: FSMContext):
         reply_markup=kb.as_markup()
     )
 
-# ================= 10. MODERATION =================
+# ================= 9. MODERATION =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -407,8 +371,6 @@ async def approve_confession(callback: types.CallbackQuery):
 
     text, file_id, file_type, category = row
     hashtags = category_to_hashtags(category)
-    
-    # Matches clean screenshot structure
     public_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
     kb_placeholder = InlineKeyboardBuilder()
@@ -428,28 +390,25 @@ async def approve_confession(callback: types.CallbackQuery):
         chat = await bot.get_chat(CHANNEL_USERNAME)
         linked_chat_id = getattr(chat, 'linked_chat_id', None)
         if linked_chat_id:
-            await asyncio.sleep(2)
             cursor.execute(
-                "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE id=?",
-                (linked_chat_id, out.message_id, conf_id)
+                "UPDATE confessions SET discussion_chat_id=? WHERE id=?",
+                (linked_chat_id, conf_id)
             )
             db.commit()
-            logging.info(f"✅ Instant sync: conf_id={conf_id} → linked_chat={linked_chat_id} msg={out.message_id}")
+            logging.info(f"✅ Sync successful: conf_id={conf_id} linked with discussion={linked_chat_id}")
     except Exception as e:
-        logging.error(f"Instant sync error: {e}")
+        logging.error(f"Sync failed during approval: {e}")
 
     db.close()
 
-    # Re-build post button styling to match the screenshot interface
+    # Generate single inline button layout
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)
     kb.button(
         text=f"💬 View / Add Comments ({comment_count})", 
         url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
     )
-    kb.button(text="❤️ 0", callback_data=f"react:like:{conf_id}")
-    kb.button(text="😭 0", callback_data=f"react:dislike:{conf_id}")
-    kb.adjust(1, 2)
+    kb.adjust(1)
 
     try:
         await bot.edit_message_reply_markup(
@@ -478,40 +437,12 @@ async def reject_confession(callback: types.CallbackQuery):
         pass
     await callback.answer("Rejected.")
 
+# Silent legacy handler for any old posts that still contain reaction buttons
 @dp.callback_query(F.data.startswith("react:"))
 async def handle_reactions(callback: types.CallbackQuery):
-    _, r_type, conf_id = callback.data.split(":")
-    conf_id = int(conf_id)
+    await callback.answer("Reactions are deactivated.")
 
-    db = get_db()
-    cursor = db.cursor()
-    if r_type == "like":
-        cursor.execute("UPDATE confessions SET likes = likes + 1 WHERE id=?", (conf_id,))
-    else:
-        cursor.execute("UPDATE confessions SET dislikes = dislikes + 1 WHERE id=?", (conf_id,))
-    db.commit()
-
-    cursor.execute("SELECT likes, dislikes, channel_msg_id FROM confessions WHERE id=?", (conf_id,))
-    likes, dislikes, channel_msg_id = cursor.fetchone()
-    db.close()
-
-    kb = InlineKeyboardBuilder()
-    comment_count = get_comment_count(conf_id)
-    kb.button(
-        text=f"💬 View / Add Comments ({comment_count})", 
-        url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
-    )
-    kb.button(text=f"❤️ {likes}", callback_data=f"react:like:{conf_id}")
-    kb.button(text=f"😭 {dislikes}", callback_data=f"react:dislike:{conf_id}")
-    kb.adjust(1, 2)
-
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
-        await callback.answer("Reaction updated!")
-    except Exception:
-        await callback.answer("Error.")
-
-# ================= 11. DISCUSSION GROUP SYNC =================
+# ================= 10. DISCUSSION GROUP SYNC =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
@@ -521,7 +452,6 @@ async def catch_discussion_mirror(message: types.Message):
             fc = message.forward_from_chat
             if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
                 orig_msg_id = message.forward_from_message_id
-                logging.info(f"🔎 Sync M1: orig={orig_msg_id}")
 
         if not orig_msg_id and message.forward_origin:
             fo = message.forward_origin
@@ -529,7 +459,6 @@ async def catch_discussion_mirror(message: types.Message):
                 uname = getattr(fo.chat, "username", "") or ""
                 if uname.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
                     orig_msg_id = fo.message_id
-                    logging.info(f"🔎 Sync M2: orig={orig_msg_id}")
 
         if orig_msg_id:
             db = get_db()
@@ -538,15 +467,13 @@ async def catch_discussion_mirror(message: types.Message):
                 "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE channel_msg_id=?",
                 (message.chat.id, message.message_id, orig_msg_id)
             )
-            rows = cursor.rowcount
             db.commit()
             db.close()
-            logging.info(f"🎯 SYNC: channel#{orig_msg_id} → group {message.chat.id} msg {message.message_id} (rows={rows})")
 
     except Exception as e:
         logging.error(f"Sync error: {e}")
 
-# ================= 12. LIFESPAN =================
+# ================= 11. LIFESPAN =================
 token_string = os.getenv("API_TOKEN", "")
 STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
 

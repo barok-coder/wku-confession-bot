@@ -151,8 +151,6 @@ def accept_user_rules(user_id: int):
     db.close()
 
 # ================= 4. IDENTITY ENGINE =================
-ANIMALS = ["Lion", "Fox", "Cheetah", "Owl", "Eagle", "Wolf", "Hawk", "Panther", "Leopard", "Shark"]
-ADJECTIVES = ["WKU_Senior", "Freshman", "Anonymous", "Hidden", "Shadow", "Silent", "Mysterious", "Clever"]
 
 def get_comment_count(conf_id: int) -> int:
     db = get_db()
@@ -429,7 +427,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
             kb_updated = InlineKeyboardBuilder()
             
             kb_updated.button(
-                text=f"💬 Confess ({comment_count})", 
+                text=f"Add Comments / view", 
                 url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
             )
             kb_updated.adjust(1)
@@ -468,7 +466,7 @@ async def browse_comments_callback(callback: types.CallbackQuery):
         await callback.answer("💬 No comments on this confession yet!", show_alert=True)
         return
     
-    comments_text = f"💬 **Comments for Confession #{conf_id}**\n\n"
+    comments_text = f"Comments for Confession #{conf_id}**\n\n"
     for i, row in enumerate(rows, 1):
         comments_text += f"{i}. {row[0]}\n"
         comments_text += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
@@ -500,7 +498,7 @@ async def back_to_card_callback(callback: types.CallbackQuery):
 async def cmd_setup_channel(message: types.Message):
     kb = InlineKeyboardBuilder()
     # Correctly links directly to @wku_confessionsbot to allow new confessions submission
-    kb.button(text="💬 Confess!", url=f"https://t.me/{BOT_USERNAME}")
+    kb.button(text="Confess", url=f"https://t.me/{BOT_USERNAME}")
     kb.adjust(1)
     
     try:

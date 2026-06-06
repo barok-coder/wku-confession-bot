@@ -52,17 +52,24 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Adjusted to target your exact main channel: @wku_confessions_official
+# Configured precisely to match your exact channels and bot usernames
 CHANNEL_PUBLIC_NAME = "wku_confessions_official"
 CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
-BOT_USERNAME = "wku_confessionbot"
+BOT_USERNAME = "wku_confessionsbot"
 
-# Dynamic channel identifier fallback (Supports numeric ID if set in environment variables)
+# Dynamic channel target configuration (supports numeric ID or username override)
 CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", CHANNEL_USERNAME)
 try:
     CHANNEL_TARGET = int(CHANNEL_ID_ENV)
 except ValueError:
     CHANNEL_TARGET = CHANNEL_ID_ENV
+
+# Dynamic admin review target configuration
+ADMIN_TARGET_ENV = os.getenv("ADMIN_GROUP_ID", "@wku_admins_review_team")
+try:
+    ADMIN_CHAT_TARGET = int(ADMIN_TARGET_ENV)
+except ValueError:
+    ADMIN_CHAT_TARGET = ADMIN_TARGET_ENV
 
 # ================= 3. DATABASE =================
 DB_FILE = "confessions.db"
@@ -209,7 +216,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     if len(args) > 1 and args[1].startswith("reply_"):
         conf_id = int(args[1].split("_")[1])
 
-    # Enforce rules check
+    # Enforce rules agreement check
     if not has_accepted_rules(message.from_user.id):
         await state.clear()
         if conf_id:
@@ -231,7 +238,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         return
 
-    # If rules are accepted, continue standard behavior
     if conf_id:
         await send_confession_card(message, conf_id)
     else:
@@ -457,12 +463,6 @@ async def handle_submission(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Please submit text, a photo, or a video.")
         return
 
-    env_admin_id = os.getenv("ADMIN_GROUP_ID", "-1003923693636")
-    try:
-        admin_chat_target = int(env_admin_id)
-    except ValueError:
-        admin_chat_target = env_admin_id
-
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -482,11 +482,11 @@ async def handle_submission(message: types.Message, state: FSMContext):
 
     try:
         if file_type == "photo":
-            await bot.send_photo(chat_id=admin_chat_target, photo=file_id, caption=admin_caption, reply_markup=kb.as_markup())
+            await bot.send_photo(chat_id=ADMIN_CHAT_TARGET, photo=file_id, caption=admin_caption, reply_markup=kb.as_markup())
         elif file_type == "video":
-            await bot.send_video(chat_id=admin_chat_target, video=file_id, caption=admin_caption, reply_markup=kb.as_markup())
+            await bot.send_video(chat_id=ADMIN_CHAT_TARGET, video=file_id, caption=admin_caption, reply_markup=kb.as_markup())
         else:
-            await bot.send_message(chat_id=admin_chat_target, text=admin_caption, reply_markup=kb.as_markup())
+            await bot.send_message(chat_id=ADMIN_CHAT_TARGET, text=admin_caption, reply_markup=kb.as_markup())
         logging.info(f"📬 Confession #{conf_id} sent to admin.")
     except Exception as e:
         logging.error(f"❌ Admin forward failed: {e}")
@@ -556,7 +556,7 @@ async def approve_confession(callback: types.CallbackQuery):
     cursor.execute("UPDATE confessions SET channel_msg_id=? WHERE id=?", (out.message_id, conf_id))
     db.commit()
 
-    # Automatically pin approved post in the channel dynamically using out.chat.id
+    # Automatically pin approved post inside your channel dynamically using out.chat.id
     try:
         await bot.pin_chat_message(
             chat_id=out.chat.id,

@@ -208,7 +208,7 @@ async def start_writing_comment(callback: types.CallbackQuery, state: FSMContext
     identity = get_or_create_identity(conf_id, callback.from_user.id)
     
     await callback.message.answer(
-        f"🎭 You are posting as {identity}.\n\n"
+        f"🎭 You are posting as **{identity}**.\n\n"
         f"Write your comment and it will appear in the confession thread:"
     )
     await callback.answer()
@@ -219,7 +219,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(chosen_category=selected_cat)
     await state.set_state(BotStates.writing_confession)
     await callback.message.edit_text(
-        f"Selected Category: {selected_cat}\n\n"
+        f"Selected Category: **{selected_cat}**\n\n"
         f"Now type your confession or send a photo/video:"
     )
     await callback.answer()
@@ -266,9 +266,9 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     if not disc_chat_id or not channel_msg_id:
         await message.answer(
             "⚠️ Could not link your comment to the channel thread.\n\n"
-            "Required setup steps:\n"
-            "1. Link a Discussion Group to your channel.\n"
-            "2. Add this bot as an Admin in that Discussion Group."
+            "**Required setup steps:**\n"
+            "1. Link a **Discussion Group** to your channel.\n"
+            "2. Add this bot as an **Admin** in that Discussion Group."
         )
         await state.clear()
         return
@@ -278,7 +278,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     try:
         sent = await bot.send_message(
             chat_id=disc_chat_id,
-            text=f"💬 {identity}:\n\n{message.text}",
+            text=f"💬 **{identity}**:\n\n{message.text}",
             reply_parameters=ReplyParameters(
                 message_id=channel_msg_id,
                 chat_id=CHANNEL_TARGET
@@ -364,7 +364,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     kb.button(text="❌ Reject", callback_data=f"adm_reject:{conf_id}")
     kb.adjust(2)
 
-    admin_caption = f"🏷️ Category: {category}\n🆔 Queue ID: `#{conf_id}`\n\n📝 Confession:\n{text}"
+    admin_caption = f"🏷️ Category: **{category}**\n🆔 Queue ID: `#{conf_id}`\n\n📝 **Confession:**\n{text}"
 
     try:
         if file_type == "photo":
@@ -416,7 +416,7 @@ async def approve_confession(callback: types.CallbackQuery):
 
     text, file_id, file_type, category = row
     hashtags = category_to_hashtags(category)
-    public_text = f"Confession #{conf_id}\n\n{text}\n\n{hashtags}"
+    public_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)

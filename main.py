@@ -27,11 +27,11 @@ class BotStates(StatesGroup):
 
 # Categories mapped to match the screenshot tags
 CATEGORIES = [
-    "Relationship 👥",
-    "School & Exam 📚",
-    "Mental Health 🧠",
-    "General 📝",
-    "Funny 😂"
+    "Relationship ",
+    "School & Exam ",
+    "Mental Health ",
+    "General ",
+    "Funny "
 ]
 
 def category_to_hashtags(category: str) -> str:
@@ -160,7 +160,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             hashtags = category_to_hashtags(category)
             comment_count = get_comment_count(conf_id)
 
-            card_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
+            card_text = f"Confession #{conf_id}\n\n{text}\n\n{hashtags}"
 
             kb = InlineKeyboardBuilder()
             kb.button(text="➕ Add Comment", callback_data=f"add_comment:{conf_id}")
@@ -188,7 +188,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     kb.adjust(2)
     await state.set_state(BotStates.choosing_category)
     await message.answer(
-        "Welcome to the Confessions Bot! 🤫\nChoose a category for your submission:",
+        "Choose a category for your confession submission:",
         reply_markup=kb.as_markup()
     )
 

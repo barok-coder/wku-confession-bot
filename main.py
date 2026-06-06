@@ -51,16 +51,17 @@ def category_to_hashtags(category: str) -> str:
 bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
-# Dynamic destination target for the channel (Supports username or numeric ID for private channels)
-CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", "@wku_confessions_official")
+# Adjusted to match your exact live channel username "wku_confession"
+CHANNEL_PUBLIC_NAME = "wku_confession"
+CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
+BOT_USERNAME = "wku_confessionbot"
+
+# Dynamic channel identifier fallback (Supports numeric ID if set in environment variables)
+CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", CHANNEL_USERNAME)
 try:
     CHANNEL_TARGET = int(CHANNEL_ID_ENV)
 except ValueError:
     CHANNEL_TARGET = CHANNEL_ID_ENV
-
-CHANNEL_PUBLIC_NAME = "wku_confession"
-CHANNEL_USERNAME = f"@{CHANNEL_PUBLIC_NAME}"
-BOT_USERNAME = "wku_confessionbot"
 
 # ================= 3. DATABASE =================
 DB_FILE = "confessions.db"
@@ -267,7 +268,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await message.answer(
             "⚠️ Could not link your comment to the channel thread.\n\n"
             "**Required setup steps:**\n"
-            "1. Link a **Discussion Group** to your channel.\n"
+            "1. Link a **Discussion Group** to your channel (Channel Settings -> Discussion -> Link Group).\n"
             "2. Add this bot as an **Admin** in that Discussion Group."
         )
         await state.clear()
@@ -418,6 +419,7 @@ async def approve_confession(callback: types.CallbackQuery):
     hashtags = category_to_hashtags(category)
     public_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
 
+    # Build the action button
     kb = InlineKeyboardBuilder()
     comment_count = get_comment_count(conf_id)
     kb.button(
@@ -435,7 +437,7 @@ async def approve_confession(callback: types.CallbackQuery):
             out = await bot.send_message(chat_id=CHANNEL_TARGET, text=public_text, reply_markup=kb.as_markup())
     except Exception as e:
         logging.error(f"❌ FAILED TO SEND TO CHANNEL {CHANNEL_TARGET}: {e}")
-        await callback.answer(f"❌ Error: Could not send to channel. Make sure bot is an admin inside {CHANNEL_TARGET}.", show_alert=True)
+        await callback.answer(f"❌ Error: Could not send to channel. Make sure the bot is added as an Administrator inside {CHANNEL_TARGET}.", show_alert=True)
         db.close()
         return
 

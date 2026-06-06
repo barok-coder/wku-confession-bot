@@ -52,7 +52,7 @@ bot: Bot = None
 dp = Dispatcher(storage=MemoryStorage())
 
 # Dynamic destination target for the channel (Supports username or numeric ID for private channels)
-CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", "@wku_confession")
+CHANNEL_ID_ENV = os.getenv("CHANNEL_ID", "@wku_confessions_official")
 try:
     CHANNEL_TARGET = int(CHANNEL_ID_ENV)
 except ValueError:

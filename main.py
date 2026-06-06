@@ -4,6 +4,7 @@ import os
 import sqlite3
 import random
 import threading
+import sys
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, types, F
@@ -101,6 +102,12 @@ def init_db():
             msg_id INTEGER
         )
         """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            accepted_rules INTEGER DEFAULT 0
+        )
+        """)
         conn.commit()
         conn.close()
 
@@ -110,6 +117,22 @@ def get_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
+
+# Helper functions for rule agreement
+def has_accepted_rules(user_id: int) -> bool:
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT accepted_rules FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    db.close()
+    return row is not None and row[0] == 1
+
+def accept_user_rules(user_id: int):
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("INSERT OR REPLACE INTO users (user_id, accepted_rules) VALUES (?, 1)", (user_id,))
+    db.commit()
+    db.close()
 
 # ================= 4. IDENTITY ENGINE =================
 ANIMALS = ["Lion", "Fox", "Cheetah", "Owl", "Eagle", "Wolf", "Hawk", "Panther", "Leopard", "Shark"]
@@ -140,64 +163,154 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
     db.close()
     return name
 
-# ================= 5. START / CATEGORY =================
+# ================= 5. UTILITY / CARD DRAWING =================
+async def send_confession_card(event, conf_id: int):
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT text, file_id, file_type, category, channel_msg_id FROM confessions WHERE id=?", 
+        (conf_id,)
+    )
+    row = cursor.fetchone()
+    db.close()
+
+    if not row:
+        if isinstance(event, types.Message):
+            await event.answer("⚠️ Confession not found.")
+        else:
+            await event.answer("⚠️ Confession not found.", show_alert=True)
+        return
+
+    text, file_id, file_type, category, channel_msg_id = row
+    hashtags = category_to_hashtags(category)
+    comment_count = get_comment_count(conf_id)
+
+    card_text = f"Confession #{conf_id}\n\n{text}\n\n{hashtags}"
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Add Comment", callback_data=f"add_comment:{conf_id}")
+    comments_url = f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1"
+    kb.button(text=f"💬 Browse Comments ({comment_count})", url=comments_url)
+    kb.adjust(1)
+
+    target = event if isinstance(event, types.Message) else event.message
+    if file_type == "photo":
+        await target.answer_photo(photo=file_id, caption=card_text, reply_markup=kb.as_markup())
+    elif file_type == "video":
+        await target.answer_video(video=file_id, caption=card_text, reply_markup=kb.as_markup())
+    else:
+        await target.answer(text=card_text, reply_markup=kb.as_markup())
+
+# ================= 6. START / RULES AGREEMENT =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
-
+    conf_id = None
     if len(args) > 1 and args[1].startswith("reply_"):
-        try:
-            conf_id = int(args[1].split("_")[1])
-            await state.clear()
-            
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute(
-                "SELECT text, file_id, file_type, category, channel_msg_id FROM confessions WHERE id=?", 
-                (conf_id,)
-            )
-            row = cursor.fetchone()
-            db.close()
+        conf_id = int(args[1].split("_")[1])
 
-            if not row:
-                await message.answer("⚠️ Confession not found.")
-                return
+    # Enforce rules check
+    if not has_accepted_rules(message.from_user.id):
+        await state.clear()
+        if conf_id:
+            await state.update_data(pending_reply_conf_id=conf_id)
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ I Accept the Rules", callback_data="accept_rules")
+        kb.button(text="❌ Cancel", callback_data="reject_rules")
+        kb.adjust(1)
+        
+        await message.answer(
+            "Welcome to the Confessions Bot! 🤫\n\n"
+            "Before using the bot, please accept our community rules:\n"
+            "1. Be respectful to other members.\n"
+            "2. No hate speech, racism, or targetted harassment.\n"
+            "3. Do not share personal phone numbers or private information.\n\n"
+            "Do you agree to these rules?",
+            reply_markup=kb.as_markup()
+        )
+        return
 
-            text, file_id, file_type, category, channel_msg_id = row
-            hashtags = category_to_hashtags(category)
-            comment_count = get_comment_count(conf_id)
+    # If rules are accepted, continue standard behavior
+    if conf_id:
+        await send_confession_card(message, conf_id)
+    else:
+        await state.clear()
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✍️ Write a Confession", callback_data="start_confess")
+        kb.button(text="📜 View Rules", callback_data="view_rules")
+        kb.adjust(1)
+        await message.answer(
+            "🎉 Thank you for accepting the rules! You can now use the bot.\n\n"
+            "Use the buttons below to get started:",
+            reply_markup=kb.as_markup()
+        )
 
-            card_text = f"Confession #{conf_id}\n\n{text}\n\n{hashtags}"
+@dp.callback_query(F.data == "accept_rules")
+async def handle_accept_rules(callback: types.CallbackQuery, state: FSMContext):
+    accept_user_rules(callback.from_user.id)
+    await callback.answer("Rules accepted!")
+    
+    state_data = await state.get_data()
+    pending_reply = state_data.get("pending_reply_conf_id")
+    
+    await callback.message.edit_text(
+        "🎉 Thank you for accepting the rules! You can now use the bot.\n\n"
+        "Use the buttons below to get started:"
+    )
+    
+    if pending_reply:
+        await state.clear()
+        await send_confession_card(callback, pending_reply)
+    else:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✍️ Write a Confession", callback_data="start_confess")
+        kb.button(text="📜 View Rules", callback_data="view_rules")
+        kb.adjust(1)
+        await callback.message.answer("Main Menu:", reply_markup=kb.as_markup())
 
-            kb = InlineKeyboardBuilder()
-            kb.button(text="➕ Add Comment", callback_data=f"add_comment:{conf_id}")
-            
-            comments_url = f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1"
-            kb.button(text=f"💬 Browse Comments ({comment_count})", url=comments_url)
-            kb.adjust(1)
+@dp.callback_query(F.data == "reject_rules")
+async def handle_reject_rules(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ You must accept the rules to use this bot. Use /start if you change your mind.")
+    await callback.answer()
 
-            if file_type == "photo":
-                await message.answer_photo(photo=file_id, caption=card_text, reply_markup=kb.as_markup())
-            elif file_type == "video":
-                await message.answer_video(video=file_id, caption=card_text, reply_markup=kb.as_markup())
-            else:
-                await message.answer(text=card_text, reply_markup=kb.as_markup())
-            return
-        except Exception as e:
-            logging.error(f"Reply link error: {e}")
-            await message.answer("⚠️ Broken reply link.")
-            return
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu_flow(callback: types.CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✍️ Write a Confession", callback_data="start_confess")
+    kb.button(text="📜 View Rules", callback_data="view_rules")
+    kb.adjust(1)
+    await callback.message.edit_text(
+        "🎉 You can use the buttons below to navigate the bot:",
+        reply_markup=kb.as_markup()
+    )
+    await callback.answer()
 
+@dp.callback_query(F.data == "view_rules")
+async def view_rules_flow(callback: types.CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Back to Menu", callback_data="back_to_menu")
+    await callback.message.edit_text(
+        "📜 **Community Rules**\n\n"
+        "1. Respect all members.\n"
+        "2. No hate speech, racism, or targetted harassment.\n"
+        "3. Avoid sharing personal information (phone numbers, private photos, etc.).\n"
+        "4. Keep it engaging and safe.",
+        reply_markup=kb.as_markup()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "start_confess")
+async def start_confess_flow(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     kb = InlineKeyboardBuilder()
     for cat in CATEGORIES:
         kb.button(text=cat, callback_data=f"select_cat:{cat}")
     kb.adjust(2)
     await state.set_state(BotStates.choosing_category)
-    await message.answer(
-        "Choose a category for your confession submission:",
-        reply_markup=kb.as_markup()
-    )
+    await callback.message.edit_text("Choose a category for your confession submission:", reply_markup=kb.as_markup())
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("add_comment:"))
 async def start_writing_comment(callback: types.CallbackQuery, state: FSMContext):
@@ -225,7 +338,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ================= 6. COMMENT HANDLER =================
+# ================= 7. COMMENT HANDLER =================
 @dp.message(BotStates.writing_comment, F.chat.type == "private")
 async def process_threaded_comment(message: types.Message, state: FSMContext):
     state_data = await state.get_data()
@@ -324,7 +437,7 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-# ================= 7. CONFESSION SUBMISSION =================
+# ================= 8. CONFESSION SUBMISSION =================
 @dp.message(BotStates.writing_confession, F.chat.type == "private")
 async def handle_submission(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -381,7 +494,7 @@ async def handle_submission(message: types.Message, state: FSMContext):
     await message.answer("📥 Submitted anonymously! Pending admin review.")
     await state.clear()
 
-# ================= 8. FALLBACK =================
+# ================= 9. FALLBACK =================
 @dp.message(F.chat.type == "private")
 async def fallback_private(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -400,7 +513,7 @@ async def fallback_private(message: types.Message, state: FSMContext):
         reply_markup=kb.as_markup()
     )
 
-# ================= 9. MODERATION =================
+# ================= 10. MODERATION =================
 @dp.callback_query(F.data.startswith("adm_approve:"))
 async def approve_confession(callback: types.CallbackQuery):
     conf_id = int(callback.data.split(":")[1])
@@ -492,7 +605,7 @@ async def reject_confession(callback: types.CallbackQuery):
 async def handle_reactions(callback: types.CallbackQuery):
     await callback.answer("Reactions are deactivated.")
 
-# ================= 10. DISCUSSION GROUP SYNC =================
+# ================= 11. DISCUSSION GROUP SYNC =================
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def catch_discussion_mirror(message: types.Message):
     try:
@@ -523,7 +636,7 @@ async def catch_discussion_mirror(message: types.Message):
     except Exception as e:
         logging.error(f"Sync error: {e}")
 
-# ================= 11. LIFESPAN =================
+# ================= 12. LIFESPAN =================
 token_string = os.getenv("API_TOKEN", "")
 STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
 

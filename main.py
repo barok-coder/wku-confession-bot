@@ -137,17 +137,45 @@ def get_or_create_identity(conf_id: int, user_id: int) -> str:
 async def cmd_start(message: types.Message, state: FSMContext):
     args = message.text.split()
 
+    # Handles deep links like https://t.me/wku_confessionsbot?start=reply_691
     if len(args) > 1 and args[1].startswith("reply_"):
         try:
             conf_id = int(args[1].split("_")[1])
             await state.clear()
-            await state.update_data(target_conf_id=conf_id)
-            await state.set_state(BotStates.writing_comment)
-            identity = get_or_create_identity(conf_id, message.from_user.id)
-            await message.answer(
-                f"🎭 You are posting as **{identity}**.\n\n"
-                f"Write your comment and it will appear in the confession thread:"
+            
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT text, file_id, file_type, category, channel_msg_id FROM confessions WHERE id=?", 
+                (conf_id,)
             )
+            row = cursor.fetchone()
+            db.close()
+
+            if not row:
+                await message.answer("⚠️ Confession not found.")
+                return
+
+            text, file_id, file_type, category, channel_msg_id = row
+            hashtags = category_to_hashtags(category)
+            comment_count = get_comment_count(conf_id)
+
+            # Styled card structure matching input_file_1.png
+            card_text = f"**Confession #{conf_id}**\n\n{text}\n\n{hashtags}"
+
+            kb = InlineKeyboardBuilder()
+            kb.button(text="➕ Add Comment", callback_data=f"add_comment:{conf_id}")
+            
+            comments_url = f"https://t.me/{CHANNEL_PUBLIC_NAME}/{channel_msg_id}?comment=1"
+            kb.button(text=f"💬 Browse Comments ({comment_count})", url=comments_url)
+            kb.adjust(1)
+
+            if file_type == "photo":
+                await message.answer_photo(photo=file_id, caption=card_text, reply_markup=kb.as_markup())
+            elif file_type == "video":
+                await message.answer_video(video=file_id, caption=card_text, reply_markup=kb.as_markup())
+            else:
+                await message.answer(text=card_text, reply_markup=kb.as_markup())
             return
         except Exception as e:
             logging.error(f"Reply link error: {e}")
@@ -164,6 +192,21 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "Welcome to the Confessions Bot! 🤫\nChoose a category for your submission:",
         reply_markup=kb.as_markup()
     )
+
+@dp.callback_query(F.data.startswith("add_comment:"))
+async def start_writing_comment(callback: types.CallbackQuery, state: FSMContext):
+    conf_id = int(callback.data.split(":")[1])
+    await state.clear()
+    await state.update_data(target_conf_id=conf_id)
+    await state.set_state(BotStates.writing_comment)
+    
+    identity = get_or_create_identity(conf_id, callback.from_user.id)
+    
+    await callback.message.answer(
+        f"🎭 You are posting as **{identity}**.\n\n"
+        f"Write your comment and it will appear in the confession thread:"
+    )
+    await callback.answer()
 
 @dp.callback_query(BotStates.choosing_category, F.data.startswith("select_cat:"))
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
@@ -187,7 +230,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Step 1: Read information from DB
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -200,7 +242,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     disc_chat_id = row[0] if row else None
     channel_msg_id = row[1] if row else None
 
-    # Step 2: Try to retrieve discussion chat dynamically if not recorded yet
     if not disc_chat_id:
         try:
             chat = await bot.get_chat(CHANNEL_USERNAME)
@@ -217,7 +258,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         except Exception as e:
             logging.error(f"Failed to auto-retrieve linked chat: {e}")
 
-    # Step 3: Still no target group chat — warn the user
     if not disc_chat_id or not channel_msg_id:
         await message.answer(
             "⚠️ Could not link your comment to the channel thread.\n\n"
@@ -231,7 +271,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
     identity = get_or_create_identity(conf_id, message.from_user.id)
 
     try:
-        # Send message to the discussion group, linking directly to the channel message
         sent = await bot.send_message(
             chat_id=disc_chat_id,
             text=f"💬 **{identity}**:\n\n{message.text}",
@@ -250,7 +289,6 @@ async def process_threaded_comment(message: types.Message, state: FSMContext):
         db.commit()
         db.close()
 
-        # Update post comments count (No reaction buttons)
         try:
             comment_count = get_comment_count(conf_id)
             kb_updated = InlineKeyboardBuilder()
@@ -395,123 +433,4 @@ async def approve_confession(callback: types.CallbackQuery):
                 (linked_chat_id, conf_id)
             )
             db.commit()
-            logging.info(f"✅ Sync successful: conf_id={conf_id} linked with discussion={linked_chat_id}")
-    except Exception as e:
-        logging.error(f"Sync failed during approval: {e}")
-
-    db.close()
-
-    # Generate single inline button layout
-    kb = InlineKeyboardBuilder()
-    comment_count = get_comment_count(conf_id)
-    kb.button(
-        text=f"💬 View / Add Comments ({comment_count})", 
-        url=f"https://t.me/{BOT_USERNAME}?start=reply_{conf_id}"
-    )
-    kb.adjust(1)
-
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=CHANNEL_USERNAME,
-            message_id=out.message_id,
-            reply_markup=kb.as_markup()
-        )
-    except Exception as e:
-        logging.error(f"Markup update error: {e}")
-
-    try:
-        if callback.message.photo or callback.message.video:
-            await callback.message.edit_caption(caption=f"✅ Approved! ID: #{conf_id}")
-        else:
-            await callback.message.edit_text(text=f"✅ Approved! ID: #{conf_id}")
-    except Exception:
-        pass
-
-    await callback.answer("Published!")
-
-@dp.callback_query(F.data.startswith("adm_reject:"))
-async def reject_confession(callback: types.CallbackQuery):
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.answer("Rejected.")
-
-# Silent legacy handler for any old posts that still contain reaction buttons
-@dp.callback_query(F.data.startswith("react:"))
-async def handle_reactions(callback: types.CallbackQuery):
-    await callback.answer("Reactions are deactivated.")
-
-# ================= 10. DISCUSSION GROUP SYNC =================
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def catch_discussion_mirror(message: types.Message):
-    try:
-        orig_msg_id = None
-
-        if message.forward_from_chat:
-            fc = message.forward_from_chat
-            if fc.username and fc.username.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
-                orig_msg_id = message.forward_from_message_id
-
-        if not orig_msg_id and message.forward_origin:
-            fo = message.forward_origin
-            if hasattr(fo, "chat") and hasattr(fo, "message_id"):
-                uname = getattr(fo.chat, "username", "") or ""
-                if uname.lstrip("@").lower() == CHANNEL_PUBLIC_NAME.lower():
-                    orig_msg_id = fo.message_id
-
-        if orig_msg_id:
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute(
-                "UPDATE confessions SET discussion_chat_id=?, discussion_msg_id=? WHERE channel_msg_id=?",
-                (message.chat.id, message.message_id, orig_msg_id)
-            )
-            db.commit()
-            db.close()
-
-    except Exception as e:
-        logging.error(f"Sync error: {e}")
-
-# ================= 11. LIFESPAN =================
-token_string = os.getenv("API_TOKEN", "")
-STATIC_WEBHOOK_PATH = f"/webhook/{token_string[:10]}" if token_string else "/webhook/default"
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global bot
-    token = os.getenv("API_TOKEN")
-    url = os.getenv("RENDER_URL", "https://wku-confession-bot-8aoc.onrender.com")
-    if not token:
-        raise RuntimeError("Missing API_TOKEN")
-    bot = Bot(token=token)
-    target_webhook_url = f"{url}/webhook/{token[:10]}"
-    await bot.set_webhook(
-        url=target_webhook_url,
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query", "channel_post", "edited_channel_post"]
-    )
-    logging.info(f"✅ Webhook set: {target_webhook_url}")
-    yield
-    if bot:
-        await bot.session.close()
-
-app = FastAPI(lifespan=lifespan)
-
-@app.post(STATIC_WEBHOOK_PATH)
-async def process_webhook_payload(request: Request):
-    if bot is not None:
-        try:
-            payload = await request.json()
-            update = types.Update.model_validate(payload, context={"bot": bot})
-            await dp.feed_update(bot, update)
-        except Exception as e:
-            logging.error(f"Webhook processing error: {e}")
-    return {"ok": True}
-
-@app.get("/")
-def read_root():
-    return {"status": "operational", "engine": "aiogram3"}
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), factory=False)
+            logging.info(f"✅ Sync successful: conf_i
